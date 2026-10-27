@@ -1,36 +1,87 @@
-@font-face { font-family: GardenInter; src: url('../assets/fonts/Inter-Variable.ttf'); }
-* { box-sizing: border-box; }
-body { margin: 0; height: 100vh; overflow: hidden; background: #e8e6d9; color: #304237; font-family: GardenInter, sans-serif; }
+/* Garden HUD in the keyyard.xyz style (tokens/components from css/base.css):
+   dark translucent panels, Jersey10 headings, letter-spaced VT323 labels, pixel blocks. */
+body { height: 100vh; overflow: hidden; }
 [hidden] { display: none !important; }
 #scene { position: fixed; inset: 0; }
 #scene canvas { display: block; }
-.garden-heading { position: fixed; top: 35px; left: 40px; pointer-events: none; }
-.eyebrow, .garden-index > span { font-size: 10px; letter-spacing: 2px; font-weight: 600; }
-h1 { margin: 19px 0 14px; font-family: Georgia, serif; font-size: clamp(32px, 4vw, 58px); line-height: .98; font-weight: 400; letter-spacing: -2px; }
-h1 em { color: #758460; font-weight: 400; }
-.garden-heading p { font-size: 11px; }
-.garden-index { position: fixed; right: 35px; top: 38px; font-size: 11px; line-height: 2.2; }
-.garden-index p { opacity: .65; }
-footer { position: fixed; bottom: 24px; left: 40px; right: 35px; display: flex; gap: 20px; align-items: center; }
-footer > div { display: grid; justify-items: center; gap: 3px; }
-.key-row { display: flex; gap: 3px; }
-kbd { display: inline-block; font: 10px GardenInter, sans-serif; padding: 5px 7px; border: 1px solid #89958080; border-radius: 3px; }
-footer p { font-size: 10px; letter-spacing: 1.5px; line-height: 2; }
-footer p span { letter-spacing: 0; opacity: .65; }
 button { font-family: inherit; cursor: pointer; }
-#replay { margin-left: auto; background: transparent; border: 0; color: inherit; font-size: 11px; }
-.plot-marker { position: fixed; z-index: 2; border: 0; background: transparent; color: #fffef3; transform: translate(-50%, -50%); padding: 15px; display: flex; align-items: center; }
-.diamond { display: grid; place-items: center; width: 32px; height: 32px; background: #384c3c; border: 3px solid #fffef3; transform: rotate(45deg); box-shadow: 0 0 0 5px #384c3c; }
-.diamond span { transform: rotate(-45deg); font-size: 24px; }
-.marker-label { position: absolute; right: 58px; white-space: nowrap; background: #384c3c; padding: 9px 15px; font-size: 13px; opacity: 0; transform: translateX(8px); transition: opacity .2s, transform .2s; pointer-events: none; }
+
+.hud-panel {
+  position: fixed;
+  z-index: 2;
+  color: var(--text-main);
+  background: #13121ad9;
+  border: 2px solid var(--border);
+  border-bottom-width: 3px;
+  backdrop-filter: blur(6px);
+  padding: 18px 20px;
+}
+.eyebrow { font-family: var(--font-headings); font-size: .8rem; letter-spacing: .08em; color: var(--diamond); }
+.hint { font-size: .78rem; line-height: 1.6; color: var(--text-dim); }
+
+/* ---------- Heading + directory (top left) ---------- */
+.garden-heading { top: 24px; left: 24px; width: min(320px, calc(150vw - 120px)); transform: scale(.667); transform-origin: top left; }
+.block-row { display: flex; gap: 4px; margin-bottom: 12px; }
+.block-row .block { width: 18px; height: 18px; box-shadow: inset -3px -3px #0000004d, inset 3px 3px #ffffff1a; }
+.garden-heading h1 { font-size: 1.9rem; line-height: 1.05; text-shadow: 3px 3px #000c; }
+.garden-heading .pixel-subtitle { font-size: 1.05rem; margin-top: 6px; }
+.lead { margin: 10px 0 14px; padding-left: 10px; border-left: 4px solid var(--grass); font-size: .85rem; color: var(--text-dim); }
+.directory { list-style: none; display: grid; gap: 6px; }
+.directory li { display: grid; grid-template-columns: 18px 1fr; gap: 0 10px; align-items: center; padding: 6px 8px; background: #ffffff08; border: 1px solid #ffffff12; }
+.directory .swatch { grid-row: span 2; width: 18px; height: 18px; background: var(--c); box-shadow: inset -3px -3px #0000004d, inset 3px 3px #ffffff26; }
+.directory .dir-title { font-family: var(--font-headings); font-size: 1rem; line-height: 1; color: var(--text-main); }
+.directory .dir-sub { font-family: var(--font-pixel); font-size: 1.05rem; line-height: 1; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim); }
+
+/* ---------- Right dock (vertical hotbar) ---------- */
+.dock { position: fixed; z-index: 3; top: 20px; right: 20px; flex-direction: column; }
+.dock .hotbar-slot { min-width: 0; width: 48px; height: 48px; padding: 0; }
+.dock .hotbar-slot:disabled { opacity: .45; cursor: default; }
+.dock .hotbar-slot:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.icon { width: 24px; height: 24px; shape-rendering: crispEdges; }
+#view-toggle .icon-camera, #view-toggle[data-view="map"] .icon-map { display: none; }
+#view-toggle[data-view="map"] .icon-camera { display: block; }
+
+/* ---------- Settings (slides out next to the dock) ---------- */
+#settings { top: 20px; right: 84px; width: 260px; animation: slide-in .18s ease-out; }
+@keyframes slide-in { from { opacity: 0; transform: translateX(12px); } }
+#settings h2, #plot-info h2 { font-size: 1.5rem; margin: 2px 0 12px; }
+.setting { display: grid; gap: 8px; margin-bottom: 10px; }
+.setting-row { display: flex; justify-content: space-between; font-size: .85rem; color: var(--text-dim); }
+.setting output { font-family: var(--font-headings); color: var(--gold); }
+input[type="range"] { -webkit-appearance: none; appearance: none; width: 100%; height: 10px; background: #0009; border: 2px solid #000c; }
+input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 18px; background: var(--grass-bright); box-shadow: inset -3px -3px #0000004d, inset 3px 3px #ffffff33; cursor: pointer; }
+input[type="range"]::-moz-range-thumb { width: 14px; height: 18px; border: 0; border-radius: 0; background: var(--grass-bright); cursor: pointer; }
+input[type="range"]:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+/* ---------- Minimap info ---------- */
+#plot-info { top: 220px; left: 24px; max-width: 280px; transform: scale(.667); transform-origin: top left; }
+
+/* ---------- Controls (bottom left) ---------- */
+.controls { position: fixed; z-index: 2; left: 24px; bottom: 20px; display: flex; flex-wrap: wrap; gap: 14px; }
+.key-group { display: flex; align-items: center; gap: 3px; }
+.key-group em { margin-left: 6px; font-style: normal; font-family: var(--font-pixel); font-size: 1rem; letter-spacing: .1em; text-transform: uppercase; color: var(--text-main); text-shadow: 2px 2px #000a; }
+kbd { min-width: 26px; height: 26px; display: inline-grid; place-items: center; padding: 0 6px; font: 1rem var(--font-headings); color: var(--text-main); background: #252528; border: 2px solid #363330; border-bottom-width: 3px; }
+kbd.wide { min-width: 52px; }
+
+/* ---------- Plot marker (diamond above the nearby plot) ---------- */
+.plot-marker { position: fixed; z-index: 2; border: 0; background: transparent; color: var(--gold); transform: translate(-50%, -50%); padding: 15px; display: flex; align-items: center; }
+.diamond { display: grid; place-items: center; width: 30px; height: 30px; background: var(--coal); border: 3px solid var(--gold); transform: rotate(45deg); box-shadow: 0 0 0 4px #0009, 0 0 14px #f5c54266; }
+.diamond span { transform: rotate(-45deg); font-size: 20px; }
+.marker-label { position: absolute; right: 56px; white-space: nowrap; font-family: var(--font-headings); font-size: 1rem; color: var(--text-main); background: #13121ae6; border: 2px solid var(--border); padding: 6px 12px; opacity: 0; transform: translateX(8px); transition: opacity .2s, transform .2s; pointer-events: none; }
 .plot-marker:hover .marker-label, .plot-marker:focus-visible .marker-label { opacity: 1; transform: none; }
-#plot-info { position: fixed; top: 35px; left: 40px; max-width: 250px; }
-#plot-info h2 { font: 36px Georgia, serif; margin: 12px 0; }
-#plot-info p, #plot-info a { font-size: 11px; line-height: 1.7; color: inherit; }
-#return { position: fixed; right: 35px; bottom: 30px; border: 1px solid #788975; border-radius: 5px; padding: 10px 14px; color: inherit; background: #f7f5e8; }
-#return kbd { margin-left: 12px; }
-#status { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #f7f5e8; padding: 18px 24px; border-radius: 5px; font-size: 13px; }
-body.map-view .garden-heading, body.map-view .garden-index, body.map-view footer { display: none; }
-@media (max-width: 700px) { .garden-heading, #plot-info { top: 20px; left: 20px; } .garden-index { display: none; } footer { left: 20px; right: 20px; gap: 10px; } footer p span { display: block; max-width: 160px; } #plot-info { max-width: 180px; } }
-/* Transition vignette; opacity is driven per frame by js/garden.js. */
-#fx { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, rgba(36,44,34,.6) 100%); }
+
+#status { left: 50%; top: 50%; transform: translate(-50%, -50%); font-family: var(--font-headings); }
+body.map-view .controls { display: none; }
+
+@media (max-width: 700px) {
+  .garden-heading { top: 12px; left: 12px; padding: 12px 14px; }
+  .directory, .lead { display: none; }
+  .controls { left: 12px; bottom: 12px; gap: 8px; }
+  #settings { right: 76px; width: min(240px, calc(100vw - 100px)); }
+}
+
+.map-link { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px; border: 1px solid #ffffff25; background: #ffffff08; color: inherit; font-size: 1rem; }
+.map-link:hover { background: #ffffff18; }
+.map-link:focus-visible { outline: 2px solid var(--gold); }
+
+.map-link:disabled { opacity: .45; cursor: default; }

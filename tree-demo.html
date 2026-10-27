@@ -3,22 +3,58 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>The Portfolio Garden — Interactive Demo</title>
+  <title>Portfolio Garden — Interactive Demo</title>
   <link rel="stylesheet" href="css/base.css" />
   <link rel="stylesheet" href="css/garden.css" />
   <script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
 </head>
 <body>
   <div id="scene"></div>
-  <div id="fx" aria-hidden="true"></div>
-  <header class="garden-heading"><span class="eyebrow">AN INTERACTIVE PORTFOLIO / DEMO CONTENT</span><h1>The portfolio<br><em>garden.</em></h1><p>A little walk. A different perspective.</p></header>
-  <div class="garden-index"><span>GARDEN DIRECTORY</span><p>01 — About<br>02 — Selected work<br>03 — Toolbox<br>04 — Say hello</p></div>
+
+  <header class="hud-panel garden-heading px-corners">
+    <div class="block-row" aria-hidden="true">
+      <span class="block block-grass"></span><span class="block block-dirt"></span><span class="block block-stone"></span><span class="block block-gold"></span>
+    </div>
+    <h1>PORTFOLIO GARDEN</h1>
+    <p class="pixel-subtitle">Interactive portfolio · demo</p>
+    <p class="lead">A little walk. A different perspective.</p>
+    <button id="view-toggle" class="map-link" type="button" disabled aria-label="Open minimap" data-view="walk">
+      <svg class="icon icon-map" viewBox="0 0 16 16" aria-hidden="true"><path d="M1 3h4v11H1zM6 2h4v11H6zM11 3h4v11h-4z" fill="currentColor" opacity=".35"/><path d="M1 3h4v1H1zM6 2h4v1H6zM11 3h4v1h-4zM2 6h2v1H2zM7 5h2v1H7zM12 8h2v1h-2zM7 9h2v2H7z" fill="currentColor"/></svg>
+      <svg class="icon icon-camera" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3h5v2h4v9H2V5h3z" fill="currentColor" opacity=".35"/><path d="M5 3h5v1H5zM2 5h12v1H2zM2 13h12v1H2zM2 6h1v7H2zM13 6h1v7h-1zM7 7h3v1H7zM6 8h1v3H6zM10 8h1v3h-1zM7 11h3v1H7z" fill="currentColor"/></svg>
+      <span class="view-label">MINIMAP</span>
+    </button>
+  </header>
+
+  <section id="plot-info" class="hud-panel px-corners" hidden>
+    <p class="eyebrow">◆ Top view</p>
+    <h2>MINIMAP</h2>
+    <p class="hint">Drag to pan · Scroll to zoom · WASD to move · ESC to return</p>
+  </section>
+
+  <nav id="dock" class="hotbar dock" aria-label="Garden controls">
+
+    <button id="settings-toggle" class="hotbar-slot" type="button" aria-label="Settings" aria-expanded="false" aria-controls="settings">
+      <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M7 1h2v2h2v1h1v1h1v2h2v2h-2v2h-1v1h-1v1H9v2H7v-2H5v-1H4v-1H3V9H1V7h2V5h1V4h1V3h2zM7 6v1H6v2h1v1h2V9h1V7H9V6z" fill="currentColor"/></svg>
+    </button>
+    <button id="replay" class="hotbar-slot" type="button" aria-label="Replay tree growth">
+      <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M7 8h2v6H7zM4 4h3v1h1v3H6V7H5V6H4zM9 3h3v1h1v2h-1v1h-1v1H9z" fill="currentColor"/><path d="M5 14h6v1H5z" fill="currentColor" opacity=".5"/></svg>
+    </button>
+  </nav>
+
+  <aside id="settings" class="hud-panel px-corners" hidden aria-label="Settings">
+    <p class="eyebrow">◆ Settings</p>
+    <h2>GARDEN</h2>
+    <label class="setting">
+      <span class="setting-row"><span>Tree grow range</span><output id="grow-range-value" for="grow-range">40 m</output></span>
+      <input id="grow-range" type="range" min="15" max="150" step="5" value="40" />
+    </label>
+    <p class="hint">Trees grow when you come this close and shrink back once you walk 15 m further away.</p>
+  </aside>
+
   <button id="plot-marker" class="plot-marker" hidden aria-label="View nearby plot from above"><span class="marker-label"></span><span class="diamond"><span>↵</span></span></button>
-  <section id="plot-info" hidden><span class="eyebrow">PORTFOLIO / TOP VIEW</span><h2></h2><p></p><a hidden>Contact placeholder ↗</a></section>
-  <button id="minimap" disabled style="position:fixed;right:35px;top:230px;z-index:3;padding:12px 18px">Minimap</button>
-  <button id="return" hidden>← Back to the garden <kbd>ESC</kbd></button>
-  <footer><div><kbd>W</kbd><span class="key-row"><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span></div><p>WALK THE GARDEN<br><span>Drag to look · WASD to walk · Nearby diamond opens minimap</span></p><button id="replay">Replay growth ↺</button></footer>
-  <div id="status" role="status">Planting your garden…</div>
+
+  <div id="status" class="hud-panel px-corners" role="status">Planting your garden…</div>
+  <script src="vendor/howler/howler.min.js"></script>
   <script type="module" src="js/garden.js"></script>
 </body>
 </html>

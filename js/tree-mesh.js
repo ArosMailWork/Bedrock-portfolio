@@ -3,20 +3,19 @@ import { pop } from './shape-tree.js';
 
 // All placeholder colours in one place; sprites/colours are meant to be replaced later.
 export const PALETTE = {
-  bark: 0x6b5442,
+  bark: 0xa77c59,
   leaf: [0x86a96b, 0xa8bd7c, 0x708f59, 0xb8ca8b],
   tile: [0xf2ede2, 0xebe5d8, 0xe4ddcf],     // plain stone
   tileInk: [0xdcd3c2, 0xd5cbb9, 0xcec4b1],  // text cells: faintly darker, readable in 3D
-  tileRing: [0xe8e4cf, 0xe1ddc6],           // grass border stone
-  grass: [0x7fc24f, 0x93d05c, 0x6aae43, 0xa4d873, 0xd99bb0],
 };
-// Replace with RGBA PNGs; alphaTest clips transparent pixels.
-export const LEAF_TEXTURE_URL = './assets/textures/leaf-placeholder.svg';
-export const GRASS_TEXTURE_URL = './assets/textures/grass-placeholder.svg';
+// Replace with an RGBA PNG; alphaTest clips transparent pixels.
+export const LEAF_TEXTURE_URL = './assets/textures/leaf-maple-lowpoly.svg';
 export const wind = { value: 0 }; // shared time uniform, advanced by the render loop
+// User-tunable (settings panel): trees grow within growRange m, shrink beyond growRange + 15 m.
+export const treeSettings = { growRange: 40 };
 
-const MARGIN = 3;        // grass border width in cells
-const SIDES = 6;         // low-poly branch cross-section
+const MARGIN = 4;        // stone border around the text, in cells
+const SIDES = 7;         // low-poly branch cross-section
 const hash = (x, z) => { const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return s - Math.floor(s); };
 const pick = (list, r) => list[Math.floor(r * list.length) % list.length];
 const smoothstep = THREE.MathUtils.smoothstep;
@@ -28,7 +27,7 @@ function loadTexture(url) {
 }
 
 // Instanced vertex sway, applied after the instance transform. `amount(seed)` is GLSL.
-function addSway(shader, amount) {
+export function addSway(shader, amount) {
   shader.uniforms.uTime = wind;
   shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <project_vertex>', `
     vec4 mvPosition = vec4(transformed, 1.0);
@@ -100,12 +99,15 @@ function branchGeometry(tree, cluster, root) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setIndex(indices);
+  geo.computeVertexNormals();
   geo.computeBoundingSphere();
   return geo;
 }
 
-// tree: growTree() output. width/depth: plot size in cells (floor covers the whole plot).
-export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, depth = 0 } = {}) {
+// tree: growTree() output. The floor is an organic low-poly patch around the text.
+export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, seed = 0 } = {}) {
+  // Darkest palette colour gives the most contrast against the pale tiles.
+  const voxelHex = [...colors].sort((a, b) => new THREE.Color(a).getHSL({}).l - new THREE.Color(b).getHSL({}).l)[0];
   const group = new THREE.Group(), resources = [], meshes = [];
   const keep = (x) => { resources.push(x); return x; };
   const matrix = new THREE.Matrix4(), position = new THREE.Vector3(), scale = new THREE.Vector3();
@@ -113,16 +115,31 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, d
   const color = new THREE.Color();
 
   // ---------- Branches: plain colour, fade out first when looking down ----------
-  const bark = keep(new THREE.MeshBasicMaterial({ color: PALETTE.bark, side: THREE.DoubleSide }));
+  const bark = keep(new THREE.MeshLambertMaterial({ color: PALETTE.bark, side: THREE.DoubleSide }));
+  // Invisible crown proxies cast the canopy shadow instead of every leaf.
+  const shadowOnly = keep(new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false }));
+  const crownGeo = keep(new THREE.IcosahedronGeometry(1, 1));
+  const crowns = []; // plot-local crown boxes, used by the falling-leaf particles
   const trunks = tree.roots.map((root, cluster) => {
     const mesh = new THREE.Mesh(keep(branchGeometry(tree, cluster, root)), bark);
     mesh.position.set(root.x, 0, root.z);
+    mesh.castShadow = mesh.receiveShadow = true;
+    const crown = new THREE.Box3();
+    for (const leaf of tree.leaves) if (leaf.cluster === cluster) crown.expandByPoint(position.set(leaf.x - root.x, leaf.y, leaf.z - root.z));
+    if (!crown.isEmpty()) {
+      crowns.push({ cluster, box: crown.clone().translate(new THREE.Vector3(root.x, 0, root.z)) });
+      const proxy = new THREE.Mesh(crownGeo, shadowOnly);
+      crown.getCenter(proxy.position);
+      crown.getSize(proxy.scale).multiplyScalar(0.42);
+      proxy.castShadow = true;
+      mesh.add(proxy);
+    }
     group.add(mesh);
     return mesh;
   });
 
   // ---------- Leaves: one instanced mesh per tree, swaying, fading via uFade ----------
-  const fade = { value: 1 };
+  const fade = { value: 1 }, sink = { value: 0 };
   const leafMaterial = keep(new THREE.MeshLambertMaterial({ map: keep(loadTexture(LEAF_TEXTURE_URL)), alphaTest: 0.45, side: THREE.DoubleSide }));
   leafMaterial.onBeforeCompile = (shader) => {
     addSway(shader, `
@@ -130,20 +147,21 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, d
       float h = clamp(seed.y / 10.0, 0.0, 1.0);
       mvPosition.x += sin(uTime * 1.3 + phase) * 0.12 * h + sin(uTime * 4.1 + phase * 7.0) * 0.03;
       mvPosition.z += cos(uTime * 1.1 + phase) * 0.09 * h;
-      mvPosition.y += sin(uTime * 3.3 + phase * 5.0) * 0.025;`);
+      mvPosition.y += sin(uTime * 3.3 + phase * 5.0) * 0.025;
+      mvPosition.y = mix(mvPosition.y, -1.2 + position.y * 0.1, uSink);`);
+    shader.uniforms.uSink = sink;
+    shader.vertexShader = 'uniform float uSink;\n' + shader.vertexShader;
     // Opacity is applied AFTER the cutout test, so the leaf shape stays while it fades.
     shader.uniforms.uFade = fade;
     shader.fragmentShader = 'uniform float uFade;\n' + shader.fragmentShader
       .replace('#include <alphatest_fragment>', '#include <alphatest_fragment>\ndiffuseColor.a *= uFade;');
   };
-  const leafGeo = keep(new THREE.PlaneGeometry(0.72, 0.72));
+  const leafGeo = keep(new THREE.PlaneGeometry(0.9, 0.9)); // maple sprite fills ~90% of the quad
   const foliage = tree.roots.map((root, cluster) => {
-    // Interleave cells so a reduced instance count still covers the whole crown.
-    const entries = tree.leaves.filter((leaf) => leaf.cluster === cluster);
-    const perCell = entries.filter((leaf) => leaf.cell === entries[0].cell).length;
-    const ordered = [];
-    for (let layer = 0; layer < perCell; layer++) for (let i = layer; i < entries.length; i += perCell) ordered.push(entries[i]);
+    // Canopy-only cells have fewer leaves; retain every entry without fixed-size cell grouping.
+    const ordered = tree.leaves.filter((leaf) => leaf.cluster === cluster);
     const mesh = new THREE.InstancedMesh(leafGeo, leafMaterial, ordered.length);
+    mesh.receiveShadow = true;
     ordered.forEach((leaf, i) => mesh.setColorAt(i, color.setHex(pick(colors, leaf.shade))));
     const bounds = new THREE.Box3().expandByPoint(new THREE.Vector3(root.x, 0, root.z));
     for (const leaf of ordered) bounds.expandByPoint(position.set(
@@ -154,53 +172,68 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, d
       rotations: ordered.map((l) => new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2 + l.tilt, 0, l.yaw, 'XYZ'))) };
   });
 
-  // ---------- Floor: generated stone tiles over the whole plot ----------
+  // ---------- Floor: organic patch of stone tiles (rounded, noisy outline) ----------
   // Same parity as the mask so mask cells land exactly on tile centres.
-  const cols = mask.w + 2 * Math.max(MARGIN, Math.ceil((width - mask.w) / 2));
-  const rows = mask.h + 2 * Math.max(MARGIN, Math.ceil((depth - mask.h) / 2));
-  const col0 = (cols - mask.w) / 2, row0 = (rows - mask.h) / 2;
-  const tileGeo = keep(new THREE.BoxGeometry(0.98, 0.14, 0.98));
-  const tiles = new THREE.InstancedMesh(tileGeo, keep(new THREE.MeshLambertMaterial()), cols * rows);
-  const grassCells = [], voxelCells = [];
+  const cols = mask.w + 2 * MARGIN, rows = mask.h + 2 * MARGIN;
+  const col0 = MARGIN, row0 = MARGIN;
+  const inkAt = (c, r) => { const mc = c - col0, mr = r - row0; return mc >= 0 && mr >= 0 && mc < mask.w && mr < mask.h && mask.cells[mr * mask.w + mc]; };
+  const nearInk = (c, r) => { for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) if (inkAt(c + dc, r + dr)) return true; return false; };
+  // 1. Organic outline.
+  const inside = new Uint8Array(cols * rows);
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-    const x = c - (cols - 1) / 2, z = r - (rows - 1) / 2, rnd = hash(x, z);
-    const mc = c - col0, mr = r - row0;
-    const ink = mc >= 0 && mr >= 0 && mc < mask.w && mr < mask.h && mask.cells[mr * mask.w + mc];
-    const edge = Math.min(c, r, cols - 1 - c, rows - 1 - r);
-    const ring = edge < MARGIN;
-    tiles.setMatrixAt(r * cols + c, matrix.makeTranslation(x, 0.07 + rnd * 0.03, z));
-    tiles.setColorAt(r * cols + c, color.setHex(pick(ink ? PALETTE.tileInk : ring ? PALETTE.tileRing : PALETTE.tile, rnd)));
-    // Clumpy grass: dense at the outer edge, thinning inwards, with low-frequency gaps.
-    const clump = 0.5 + 0.5 * Math.sin(x * 0.55 + Math.sin(z * 0.4) * 2) * Math.cos(z * 0.5 - x * 0.2);
-    if (ring && hash(z, x) < (edge === 0 ? 0.9 : edge === 1 ? 0.75 : 0.45) * (0.4 + clump * 0.6)) grassCells.push({ x, z, rnd });
+    const x = c - (cols - 1) / 2, z = r - (rows - 1) / 2;
+    const nx = x / (cols / 2), nz = z / (rows / 2), a = Math.atan2(nz, nx);
+    const wobble = 1 + 0.1 * Math.sin(a * 5 + seed) + 0.05 * Math.sin(a * 11 + seed * 2);
+    if (nearInk(c, r) || (nx ** 4 + nz ** 4) * wobble <= 1) inside[r * cols + c] = 1;
+  }
+  // 2. Distance (in cells, max 4) from each inside cell to the lawn.
+  const edge = new Uint8Array(cols * rows).fill(9);
+  const isIn = (c, r) => c >= 0 && r >= 0 && c < cols && r < rows && inside[r * cols + c];
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (!inside[r * cols + c]) continue;
+    for (let k = 1; k <= 4 && edge[r * cols + c] === 9; k++) {
+      if (!isIn(c - k, r) || !isIn(c + k, r) || !isIn(c, r - k) || !isIn(c, r + k)) edge[r * cols + c] = k;
+    }
+  }
+  // 3. Erode the border into the lawn: tiles thin out, tilt, shrink and sink; some break into
+  //    chips. Text cells (and their direct neighbours) are never touched.
+  const KEEP = [0, 0.4, 0.7, 0.88, 0.97];
+  const floorCells = [], chips = [], voxelCells = [], floorKeys = new Set();
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (!inside[r * cols + c]) continue;
+    const x = c - (cols - 1) / 2, z = r - (rows - 1) / 2, rnd = hash(x + seed, z), rnd2 = hash(z - seed, x * 1.3);
+    const ink = inkAt(c, r), e = edge[r * cols + c];
+    const protectedCell = ink || [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dc, dr]) => inkAt(c + dc, r + dr));
+    const wear = protectedCell || e > 4 ? 0 : 1 - KEEP[e];
+    if (rnd2 < wear) {
+      if (rnd < 0.55) chips.push({ x: x + (rnd - 0.5) * 0.5, z: z + (rnd2 - 0.5) * 0.5, rnd, size: 0.25 + rnd * 0.3 });
+      continue; // lawn shows through; grass grows here
+    }
+    floorCells.push({ x, z, ink, rnd, wear });
+    floorKeys.add(`${x},${z}`);
     if (ink) voxelCells.push({ x, z, rnd });
   }
-  group.add(tiles); meshes.push(tiles);
-
-  // ---------- Grass tufts: three crossed quads per cell, swaying ----------
-  const grassMaterial = keep(new THREE.MeshLambertMaterial({ map: keep(loadTexture(GRASS_TEXTURE_URL)), alphaTest: 0.45, side: THREE.DoubleSide }));
-  grassMaterial.onBeforeCompile = (shader) => addSway(shader, `
-      float k = position.y * position.y;
-      mvPosition.x += sin(uTime * 2.0 + seed.x * 0.7 + seed.z * 0.5) * 0.12 * k;
-      mvPosition.z += cos(uTime * 1.7 + seed.z * 0.6) * 0.08 * k;`);
-  const grassGeo = keep(new THREE.PlaneGeometry(0.9, 0.9).translate(0, 0.45, 0));
-  const grass = new THREE.InstancedMesh(grassGeo, grassMaterial, Math.max(1, grassCells.length * 3));
-  grassCells.forEach((g, i) => {
-    for (let j = 0; j < 3; j++) {
-      const r = hash(g.x * 3 + j, g.z * 5 - j);
-      rotation.setFromAxisAngle(up, r * Math.PI);
-      grass.setMatrixAt(i * 3 + j, matrix.compose(position.set(g.x + (r - 0.5) * 0.6, 0.14, g.z + (hash(g.z + j, g.x) - 0.5) * 0.6),
-        rotation, scale.set(0.8 + r * 0.5, 0.7 + g.rnd * 0.7, 0.8 + r * 0.5)));
-      grass.setColorAt(i * 3 + j, color.setHex(pick(PALETTE.grass, r)));
-    }
+  const tileGeo = keep(new THREE.BoxGeometry(0.98, 0.1, 0.98));
+  const tiles = new THREE.InstancedMesh(tileGeo, keep(new THREE.MeshLambertMaterial()), floorCells.length + chips.length);
+  const worn = new THREE.Color(0xb9b49a); // weathered, mossy stone at the border
+  floorCells.forEach((cell, i) => {
+    const w = cell.wear;
+    rotation.setFromEuler(new THREE.Euler((cell.rnd - 0.5) * 0.12 * w, (cell.rnd - 0.5) * 0.5 * w, 0));
+    tiles.setMatrixAt(i, matrix.compose(position.set(cell.x, 0.01 + cell.rnd * 0.025 - w * 0.03, cell.z), rotation, scale.set(1 - w * 0.25, 1, 1 - w * 0.2)));
+    tiles.setColorAt(i, color.setHex(pick(cell.ink ? PALETTE.tileInk : PALETTE.tile, cell.rnd)).lerp(worn, w * 0.5));
   });
-  grass.count = grassCells.length * 3;
-  grass.computeBoundingSphere();
-  group.add(grass); meshes.push(grass);
+  chips.forEach((chip, k) => {
+    rotation.setFromEuler(new THREE.Euler(0, chip.rnd * 6.28, 0));
+    tiles.setMatrixAt(floorCells.length + k, matrix.compose(position.set(chip.x, -0.01, chip.z), rotation, scale.set(chip.size, 0.8, chip.size * 0.8)));
+    tiles.setColorAt(floorCells.length + k, color.setHex(pick(PALETTE.tile, chip.rnd)).lerp(worn, 0.4));
+  });
+  tiles.receiveShadow = true;
+  tiles.computeBoundingSphere();
+  group.add(tiles); meshes.push(tiles);
 
   // ---------- Voxel text: rises from the floor in the top view, replaces the leaves ----------
   const rise = { value: 0 };
-  const voxelMaterial = keep(new THREE.MeshLambertMaterial());
+  const voxelMaterial = keep(new THREE.MeshLambertMaterial({ transparent: true, opacity: 0, depthWrite: false }));
   voxelMaterial.onBeforeCompile = (shader) => {
     shader.uniforms.uRise = rise;
     shader.vertexShader = 'uniform float uRise;\n' + shader.vertexShader
@@ -209,11 +242,13 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, d
   const voxelGeo = keep(new THREE.BoxGeometry(0.96, 0.6, 0.96).translate(0, 0.3, 0));
   const voxels = new THREE.InstancedMesh(voxelGeo, voxelMaterial, Math.max(1, voxelCells.length));
   voxelCells.forEach((cell, i) => {
-    voxels.setMatrixAt(i, matrix.compose(position.set(cell.x, 0.15, cell.z), rotation.identity(), scale.set(1, 0.8 + cell.rnd * 0.4, 1)));
-    voxels.setColorAt(i, color.setHex(pick(colors, hash(cell.z * 0.37, cell.x * 0.61))));
+    // One flat colour and height: the minimap text must read cleanly (leaves stay multicolour).
+    voxels.setMatrixAt(i, matrix.makeTranslation(cell.x, 0.06, cell.z));
+    voxels.setColorAt(i, color.setHex(voxelHex));
   });
   voxels.count = voxelCells.length;
   voxels.visible = false;
+  voxels.receiveShadow = true;
   voxels.computeBoundingSphere();
   group.add(voxels); meshes.push(voxels);
 
@@ -236,7 +271,10 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, d
   }
 
   return {
-    group, size: { w: cols, h: rows },
+    group, size: { w: cols, h: rows }, floor: floorCells, crowns,
+    isGrown: (cluster) => foliage[cluster].time >= tree.maxT && foliage[cluster].mesh.visible,
+    // Local plot coordinates -> is this a stone tile? (grass and props avoid the floor)
+    isFloor: (x, z) => floorKeys.has(`${Math.round(x + (cols - 1) / 2) - (cols - 1) / 2},${Math.round(z + (rows - 1) / 2) - (rows - 1) / 2}`),
     // Range activation (hysteresis), frustum culling and view-dependent leaf thinning.
     tick(dt, observer, pinned, instant = false, camera = null) {
       if (camera) {
@@ -244,12 +282,13 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, d
         projection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         frustum.setFromProjectionMatrix(projection);
       }
-      const leavesOn = flat < 0.85, barkOn = flat < 0.3;
-      const ratio = 1 - 0.75 * smoothstep(flat, 0.15, 0.85);
+      const leavesOn = flat < 0.8, barkOn = flat < 0.3;
+      const ratio = 1; // Preserve crown density while it sinks; no instance-count popping.
       foliage.forEach((item, i) => {
         const root = tree.roots[i];
         const distance = Math.hypot(observer.x - group.position.x - root.x, observer.z - group.position.z - root.z);
-        item.active = pinned || distance < (item.active ? 105 : 85);
+        const range = treeSettings.growRange;
+        item.active = pinned || distance < (item.active ? range + 15 : range);
         const end = item.active ? tree.maxT : 0;
         const next = instant ? end : THREE.MathUtils.clamp(item.time + Math.sign(end - item.time) * dt, 0, tree.maxT);
         if (next !== item.time) { item.time = next; item.dirty = true; }
@@ -267,11 +306,14 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, width = 0, d
       flat = p;
       bark.opacity = 1 - smoothstep(p, 0, 0.3);
       bark.transparent = bark.opacity < 1;
-      fade.value = 1 - smoothstep(p, 0.35, 0.85);
+      sink.value = smoothstep(p, 0.05, 0.8);
+      fade.value = 1 - smoothstep(p, 0.65, 0.8);
       leafMaterial.transparent = fade.value < 1;
       leafMaterial.depthWrite = fade.value === 1;
-      rise.value = smoothstep(p, 0.3, 0.8);
-      voxels.visible = rise.value > 0;
+      rise.value = 1;
+      voxelMaterial.opacity = smoothstep(p, 0.05, 0.5);
+      voxelMaterial.depthWrite = voxelMaterial.opacity === 1;
+      voxels.visible = voxelMaterial.opacity > 0;
     },
     dispose() { resources.forEach((r) => r.dispose()); meshes.forEach((m) => m.dispose()); },
   };
