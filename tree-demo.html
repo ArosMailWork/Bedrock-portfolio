@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Portfolio Garden — Interactive Demo</title>
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/garden.css" />
+  <script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
+</head>
+<body>
+  <div id="scene"></div>
+  <div id="fx" aria-hidden="true"></div>
+  <header class="garden-heading"><span class="eyebrow">AN INTERACTIVE PORTFOLIO / DEMO CONTENT</span><h1>The portfolio<br><em>garden.</em></h1><p>A little walk. A different perspective.</p></header>
+  <div class="garden-index"><span>GARDEN DIRECTORY</span><p>01 — About<br>02 — Selected work<br>03 — Toolbox<br>04 — Say hello</p></div>
+  <button id="plot-marker" class="plot-marker" hidden aria-label="View nearby plot from above"><span class="marker-label"></span><span class="diamond"><span>↵</span></span></button>
+  <section id="plot-info" hidden><span class="eyebrow">PORTFOLIO / TOP VIEW</span><h2></h2><p></p><a hidden>Contact placeholder ↗</a></section>
+  <button id="minimap" disabled style="position:fixed;right:35px;top:230px;z-index:3;padding:12px 18px">Minimap</button>
+  <button id="return" hidden>← Back to the garden <kbd>ESC</kbd></button>
+  <footer><div><kbd>W</kbd><span class="key-row"><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span></div><p>WALK THE GARDEN<br><span>Drag to look · WASD to walk · Nearby diamond opens minimap</span></p><button id="replay">Replay growth ↺</button></footer>
+  <div id="status" role="status">Planting your garden…</div>
+  <script type="module" src="js/garden.js"></script>
+</body>
+</html>

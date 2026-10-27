@@ -1,0 +1,36 @@
+@font-face { font-family: GardenInter; src: url('../assets/fonts/Inter-Variable.ttf'); }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; overflow: hidden; background: #e8e6d9; color: #304237; font-family: GardenInter, sans-serif; }
+[hidden] { display: none !important; }
+#scene { position: fixed; inset: 0; }
+#scene canvas { display: block; }
+.garden-heading { position: fixed; top: 35px; left: 40px; pointer-events: none; }
+.eyebrow, .garden-index > span { font-size: 10px; letter-spacing: 2px; font-weight: 600; }
+h1 { margin: 19px 0 14px; font-family: Georgia, serif; font-size: clamp(32px, 4vw, 58px); line-height: .98; font-weight: 400; letter-spacing: -2px; }
+h1 em { color: #758460; font-weight: 400; }
+.garden-heading p { font-size: 11px; }
+.garden-index { position: fixed; right: 35px; top: 38px; font-size: 11px; line-height: 2.2; }
+.garden-index p { opacity: .65; }
+footer { position: fixed; bottom: 24px; left: 40px; right: 35px; display: flex; gap: 20px; align-items: center; }
+footer > div { display: grid; justify-items: center; gap: 3px; }
+.key-row { display: flex; gap: 3px; }
+kbd { display: inline-block; font: 10px GardenInter, sans-serif; padding: 5px 7px; border: 1px solid #89958080; border-radius: 3px; }
+footer p { font-size: 10px; letter-spacing: 1.5px; line-height: 2; }
+footer p span { letter-spacing: 0; opacity: .65; }
+button { font-family: inherit; cursor: pointer; }
+#replay { margin-left: auto; background: transparent; border: 0; color: inherit; font-size: 11px; }
+.plot-marker { position: fixed; z-index: 2; border: 0; background: transparent; color: #fffef3; transform: translate(-50%, -50%); padding: 15px; display: flex; align-items: center; }
+.diamond { display: grid; place-items: center; width: 32px; height: 32px; background: #384c3c; border: 3px solid #fffef3; transform: rotate(45deg); box-shadow: 0 0 0 5px #384c3c; }
+.diamond span { transform: rotate(-45deg); font-size: 24px; }
+.marker-label { position: absolute; right: 58px; white-space: nowrap; background: #384c3c; padding: 9px 15px; font-size: 13px; opacity: 0; transform: translateX(8px); transition: opacity .2s, transform .2s; pointer-events: none; }
+.plot-marker:hover .marker-label, .plot-marker:focus-visible .marker-label { opacity: 1; transform: none; }
+#plot-info { position: fixed; top: 35px; left: 40px; max-width: 250px; }
+#plot-info h2 { font: 36px Georgia, serif; margin: 12px 0; }
+#plot-info p, #plot-info a { font-size: 11px; line-height: 1.7; color: inherit; }
+#return { position: fixed; right: 35px; bottom: 30px; border: 1px solid #788975; border-radius: 5px; padding: 10px 14px; color: inherit; background: #f7f5e8; }
+#return kbd { margin-left: 12px; }
+#status { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); background: #f7f5e8; padding: 18px 24px; border-radius: 5px; font-size: 13px; }
+body.map-view .garden-heading, body.map-view .garden-index, body.map-view footer { display: none; }
+@media (max-width: 700px) { .garden-heading, #plot-info { top: 20px; left: 20px; } .garden-index { display: none; } footer { left: 20px; right: 20px; gap: 10px; } footer p span { display: block; max-width: 160px; } #plot-info { max-width: 180px; } }
+/* Transition vignette; opacity is driven per frame by js/garden.js. */
+#fx { position: fixed; inset: 0; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, rgba(36,44,34,.6) 100%); }
