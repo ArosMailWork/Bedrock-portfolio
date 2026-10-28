@@ -42,7 +42,12 @@ button { font-family: inherit; cursor: pointer; }
 #view-toggle[data-view="map"] .icon-camera { display: block; }
 
 /* ---------- Settings (slides out next to the dock) ---------- */
-#settings { top: 20px; right: 84px; width: 260px; animation: slide-in .18s ease-out; }
+#settings { top: 20px; right: 84px; width: 260px; max-height: calc(100vh - 40px); overflow-y: auto; animation: slide-in .18s ease-out; }
+.settings-section { margin-top: 18px; }
+.setting-toggle input { accent-color: var(--grass-bright); width: 16px; height: 16px; }
+#post-controls .setting { margin-bottom: 6px; }
+.settings-button { width: 100%; margin-top: 6px; padding: 8px; font-family: var(--font-headings); font-size: .9rem; color: var(--text-main); background: #252528; border: 2px solid #363330; border-bottom-width: 3px; cursor: pointer; }
+.settings-button:hover, .settings-button:focus-visible { border-color: var(--gold); }
 @keyframes slide-in { from { opacity: 0; transform: translateX(12px); } }
 #settings h2, #plot-info h2 { font-size: 1.5rem; margin: 2px 0 12px; }
 .setting { display: grid; gap: 8px; margin-bottom: 10px; }

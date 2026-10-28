@@ -1,4 +1,4 @@
-// Plaza fountain: low-poly lathe basin + bowl, rippling water discs and GPU water particles.
+// Plaza fountain: low-poly lathe basin + bowl, stylised water discs and GPU droplet particles.
 // Every particle follows an analytic ballistic arc in the vertex shader (no per-frame CPU work).
 import * as THREE from 'three';
 
@@ -13,13 +13,22 @@ const lathe = (profile, color, segments = 14) => {
   return mesh;
 };
 
-function waterSurface(radius, y, time) {
+// Stylised water, after the water of bruno-simon.com (github.com/brunosimon/folio-2025, MIT):
+// colour from a depth gradient (turquoise shallow -> navy deep), a solid foam band at the rim,
+// broken foam strokes drifting towards the rim that thin out over deep water, and a thin white
+// line where an object (pillar / spout, radius `inner`) pierces the surface. Re-implemented here.
+export const WATER_COLORS = { shallow: 0x5bc2b9, deep: 0x13375f, foam: 0xf4fbff, dropCore: 0xe9fdff, dropRim: 0x7fd3ea };
+
+function waterSurface(radius, y, time, inner) {
   const material = new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false,
-    uniforms: { uTime: time, uRadius: { value: radius }, uDeep: { value: new THREE.Color(0x314784) }, uLight: { value: new THREE.Color(0x96f4ed) } },
+    uniforms: {
+      uTime: time, uRadius: { value: radius }, uInner: { value: inner },
+      uShallow: { value: new THREE.Color(WATER_COLORS.shallow) }, uDeep: { value: new THREE.Color(WATER_COLORS.deep) },
+      uFoam: { value: new THREE.Color(WATER_COLORS.foam) },
+    },
     vertexShader: 'varying vec2 vP; void main() { vP = position.xy; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
     fragmentShader: `
-      uniform float uTime, uRadius; uniform vec3 uDeep, uLight; varying vec2 vP;
+      uniform float uTime, uRadius, uInner; uniform vec3 uShallow, uDeep, uFoam; varying vec2 vP;
       float noise(vec2 p) {
         vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
         vec2 k = vec2(127.1, 311.7);
@@ -30,19 +39,23 @@ function waterSurface(radius, y, time) {
         return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
       }
       void main() {
-        float r = length(vP) / uRadius;
-        float n = noise(vP * 4.0 + vec2(uTime * 0.18, -uTime * 0.12));
-        float detail = noise(vP * 10.0 - uTime * 0.1);
-        float bands = floor(clamp(n * 0.8 + detail * 0.2, 0.0, 0.99) * 3.0) / 2.0;
-        vec3 col = mix(uDeep, uLight, 0.15 + bands * 0.65);
-        float ripple = step(0.94, sin(r * 45.0 - uTime * 3.0 + n * 4.0));
-        float foam = step(0.72, n * 0.6 + detail * 0.4);
-        col = mix(col, vec3(0.65, 0.95, 0.9), max(ripple * 0.65, foam));
-        col += vec3(0.15, 0.4, 0.4) * step(0.975, r);
+        float r = length(vP);
+        float depth = clamp((uRadius - r) / (uRadius * 0.75), 0.0, 1.0);   // 0 at the rim, 1 deep
+        float wobble = noise(vP * 2.2 + uTime * 0.05) - 0.5;
+        vec3 col = mix(uShallow, uDeep, smoothstep(0.05, 0.85, depth + wobble * 0.15));
+        // Solid foam band along the rim.
+        float rim = step(depth, 0.06 + 0.04 * noise(vP * 6.0 + uTime * 0.3));
+        // Bands parallel to the rim, drifting towards it; noise breaks each band into strokes.
+        float wave = depth * 5.0 + uTime * 0.35;
+        float breakup = noise(vP * 2.8 + floor(wave) * 7.31);
+        float strokes = step(fract(wave), mix(0.22, 0.04, depth)) * step(0.42 + depth * 0.25, breakup) * step(depth, 0.85);
+        // Thin line where the pillar / spout pierces the surface.
+        float pierce = step(r, uInner + 0.045 + 0.015 * sin(atan(vP.y, vP.x) * 6.0 + uTime * 2.0));
+        col = mix(col, uFoam, max(max(rim, strokes), pierce));
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
-  const mesh = new THREE.Mesh(new THREE.CircleGeometry(radius, 32), material);
+  const mesh = new THREE.Mesh(new THREE.CircleGeometry(radius, 48), material);
   mesh.rotation.x = -Math.PI / 2;
   mesh.position.y = y;
   return mesh;
@@ -53,7 +66,7 @@ function waterSurface(radius, y, time) {
 function addEmitter(list, count, { r0, y0, u, vy, floorY, size }, rand) {
   for (let i = 0; i < count; i++) {
     list.push([rand() * Math.PI * 2, r0[0] + rand() * (r0[1] - r0[0]), y0,
-      u[0] + rand() * (u[1] - u[0]), vy[0] + rand() * (vy[1] - vy[0]), floorY, rand(), size * (0.7 + rand() * 0.6)]);
+      u[0] + rand() * (u[1] - u[0]), vy[0] + rand() * (vy[1] - vy[0]), floorY, rand(), size * (0.45 + rand() * 0.9)]);
   }
 }
 
@@ -64,17 +77,17 @@ export function buildFountain(scene, physics, time) {
   scene.add(lathe([[0.55, 0.12], [0.42, 0.3], [0.26, 0.55], [0.22, 1.3], [0.34, 1.48], [0, 1.5]], stoneDark, 10));
   scene.add(lathe([[0.15, 1.48], [0.6, 1.52], [1.02, 1.64], [1.06, 1.78], [0.95, 1.8], [0.88, 1.7], [0.15, 1.66]], stone, 12));
   scene.add(lathe([[0.16, 1.66], [0.11, 2.1], [0.16, 2.2], [0, 2.22]], stoneDark, 8));          // spout
-  scene.add(waterSurface(2.22, WATER_Y, time));
-  scene.add(waterSurface(0.9, BOWL_Y, time));
+  scene.add(waterSurface(2.22, WATER_Y, time, 0.3));   // pillar radius at the basin water line
+  scene.add(waterSurface(0.9, BOWL_Y, time, 0.15));    // spout radius at the bowl water line
   physics.cylinder(0, 0.35, 0, 0.35, 2.7);
 
   let seed = 3;
   const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
   const particles = [];
-  addEmitter(particles, 420, { r0: [0, 0.05], y0: SPOUT_Y, u: [0.5, 0.78], vy: [3.3, 3.9], floorY: BOWL_Y, size: 0.09 }, rand); // jet
-  addEmitter(particles, 380, { r0: [0.98, 1.05], y0: BOWL_Y, u: [0.3, 0.5], vy: [0.0, 0.25], floorY: WATER_Y, size: 0.08 }, rand); // spill sheet
-  addEmitter(particles, 220, { r0: [1.1, 1.4], y0: WATER_Y, u: [-0.25, 0.35], vy: [0.7, 1.4], floorY: WATER_Y, size: 0.06 }, rand); // splash
-  addEmitter(particles, 120, { r0: [0.15, 0.6], y0: BOWL_Y, u: [-0.3, 0.3], vy: [0.5, 1.0], floorY: BOWL_Y, size: 0.05 }, rand); // bowl splash
+  addEmitter(particles, 260, { r0: [0, 0.05], y0: SPOUT_Y, u: [0.5, 0.78], vy: [3.3, 3.9], floorY: BOWL_Y, size: 0.17 }, rand); // jet
+  addEmitter(particles, 240, { r0: [0.98, 1.05], y0: BOWL_Y, u: [0.3, 0.5], vy: [0.0, 0.25], floorY: WATER_Y, size: 0.15 }, rand); // spill sheet
+  addEmitter(particles, 140, { r0: [1.1, 1.4], y0: WATER_Y, u: [-0.25, 0.35], vy: [0.7, 1.4], floorY: WATER_Y, size: 0.13 }, rand); // splash
+  addEmitter(particles, 80, { r0: [0.15, 0.6], y0: BOWL_Y, u: [-0.3, 0.3], vy: [0.5, 1.0], floorY: BOWL_Y, size: 0.11 }, rand); // bowl splash
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(particles.length * 3), 3));
@@ -82,11 +95,15 @@ export function buildFountain(scene, physics, time) {
   geo.setAttribute('aB', new THREE.Float32BufferAttribute(particles.flatMap((p) => p.slice(4, 8)), 4)); // vy, floor, seed, size
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 1.4, 0), 3.5);
   const pixel = { value: 1 };
+  // Droplets: opaque two-tone discs (bright core, dark rim) that pop in and shrink as they fall.
   const points = new THREE.Points(geo, new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false,
-    uniforms: { uTime: time, uPixel: pixel },
+    uniforms: {
+      uTime: time, uPixel: pixel,
+      uCore: { value: new THREE.Color(WATER_COLORS.dropCore).multiplyScalar(1.25) }, // > 1: soft post glow
+      uRim: { value: new THREE.Color(WATER_COLORS.dropRim) },
+    },
     vertexShader: `
-      attribute vec4 aA, aB; uniform float uTime, uPixel; varying float vAlpha;
+      attribute vec4 aA, aB; uniform float uTime, uPixel;
       void main() {
         float g = ${GRAVITY.toFixed(1)};
         float vy = aB.x, y0 = aA.z, floorY = aB.y;
@@ -97,16 +114,15 @@ export function buildFountain(scene, physics, time) {
         vec3 p = vec3(cos(aA.x) * r, y0 + vy * t - 0.5 * g * t * t, sin(aA.x) * r);
         vec4 mv = modelViewMatrix * vec4(p, 1.0);
         gl_Position = projectionMatrix * mv;
-        gl_PointSize = aB.w * uPixel / -mv.z;
-        vAlpha = smoothstep(0.0, 0.1, k) * (1.0 - smoothstep(0.8, 1.0, k));
+        float grow = smoothstep(0.0, 0.08, k) * mix(1.0, 0.45, k) * (1.0 - smoothstep(0.88, 1.0, k));
+        gl_PointSize = aB.w * grow * uPixel / -mv.z;
       }`,
     fragmentShader: `
-      varying float vAlpha;
+      uniform vec3 uCore, uRim;
       void main() {
-        vec2 p = gl_PointCoord - 0.5;
-        if (max(abs(p.x), abs(p.y)) > 0.45 || abs(p.x) + abs(p.y) > 0.65) discard;
-        vec3 water = mix(vec3(0.25, 0.65, 0.85), vec3(0.9, 1.15, 1.2), step(p.x + p.y, -0.08));
-        gl_FragColor = vec4(water, vAlpha);
+        float d = length(gl_PointCoord - 0.5);
+        if (d > 0.5) discard;
+        gl_FragColor = vec4(d < 0.38 ? uCore : uRim, 1.0);
       }`,
   }));
   scene.add(points);

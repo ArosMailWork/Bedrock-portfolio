@@ -49,6 +49,12 @@
       <input id="grow-range" type="range" min="15" max="150" step="5" value="40" />
     </label>
     <p class="hint">Trees grow when you come this close and shrink back once you walk 15 m further away.</p>
+    <p class="eyebrow settings-section">◆ Post processing</p>
+    <label class="setting setting-toggle">
+      <span class="setting-row"><span>Enabled (bloom + colour grading)</span><input id="post-enabled" type="checkbox" checked /></span>
+    </label>
+    <div id="post-controls"></div>
+    <button id="post-reset" class="settings-button" type="button">RESET TO DEFAULT</button>
   </aside>
 
   <button id="plot-marker" class="plot-marker" hidden aria-label="View nearby plot from above"><span class="marker-label"></span><span class="diamond"><span>↵</span></span></button>

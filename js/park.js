@@ -15,6 +15,8 @@ export const PARK_COLORS = {
   grassTip: 0xc9e27a, // blades fade from the ground colour at the root to this tint at the tip
 };
 const PATH_HALF = 1.3, PLAZA_R = 7;
+// Grass streaming: square size (m), build radius, free radius, squares built per frame.
+export const GRASS = { chunk: 32, radius: 110, keep: 150, perFrame: 2 };
 const lambert = (color) => new THREE.MeshLambertMaterial({ color, flatShading: true });
 
 // plots: [{ x, z, view, entrance }], houses: [{ x, z, angle }] (angle: door faces +z rotated).
@@ -212,20 +214,9 @@ export function buildPark({ scene, physics, R, plots, houses, time }) {
   // ---------- Grass: dense thin blades that grow out of the ground colour ----------
   // Single triangles with up-facing normals shade exactly like the lawn, so a field of blades
   // reads as soft fur rather than dark spikes. Dense patches + sparse lawn + tall plot borders.
-  const blades = [];
-  const step = 0.32;
-  for (let x = -R * 1.1; x < R * 1.1; x += step) for (let z = -R * 1.1; z < R * 1.1; z += step) {
-    const px = x + (rand() - 0.5) * step, pz = z + (rand() - 0.5) * step;
-    const sNorm = Math.hypot(px, pz) / shoreRadius(Math.atan2(pz, px), R);
-    if (sNorm > 0.9 || Math.hypot(px, pz) < PLAZA_R + 0.6) continue;
-    const clump = 0.5 + 0.5 * Math.sin(px * 0.13 + Math.sin(pz * 0.11) * 2) * Math.cos(pz * 0.12 - px * 0.05);
-    const dense = THREE.MathUtils.smoothstep(clump, 0.45, 0.75);
-    if (rand() > 0.08 + 0.85 * dense) continue; // cheap reject before the costly tests
-    if (nearHouse(px, pz, 4.4) || onPath(px, pz, 0.3) || isFloor(px, pz)) continue;
-    const edge = nearFloor(px, pz, 1.0);
-    const h = edge ? 0.7 + rand() * 0.5 : 0.25 + dense * 0.65 + rand() * 0.25;
-    blades.push([px, pz, h, sNorm]);
-  }
+  // Streamed in GRASS.chunk-metre squares: only squares within GRASS.radius of the player exist
+  // (built a few per frame, seeded per square so they come back identical), squares beyond
+  // GRASS.keep are freed. Keeps the blade count flat however large the island grows.
   const bladeGeo = new THREE.BufferGeometry();
   bladeGeo.setAttribute('position', new THREE.Float32BufferAttribute([-0.07, 0, 0, 0.07, 0, 0, 0, 1, 0], 3));
   bladeGeo.setAttribute('normal', new THREE.Float32BufferAttribute([0, 1, 0, 0, 1, 0, 0, 1, 0], 3));
@@ -233,10 +224,14 @@ export function buildPark({ scene, physics, R, plots, houses, time }) {
   const tip = new THREE.Color(PARK_COLORS.grassTip);
   const bladeMat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
   bladeMat.onBeforeCompile = (shader) => {
+    // Shared wind (wind.js): blades lean downwind, travelling gusts bend them further and make
+    // them a little shorter; a tiny flutter keeps calm blades alive.
     addSway(shader, `
       float k = position.y * position.y;
-      mvPosition.x += sin(uTime * 2.0 + seed.x * 0.7 + seed.z * 0.5) * 0.12 * k;
-      mvPosition.z += cos(uTime * 1.7 + seed.z * 0.6) * 0.09 * k;
+      float bladeH = length(instanceMatrix[1].xyz);
+      mvPosition.xz += windHere * k * bladeH * 1.2;
+      mvPosition.y -= dot(windHere, windHere) * k * bladeH * 0.5;
+      mvPosition.x += sin(uTime * 7.0 + seed.x * 3.1 + seed.z) * 0.015 * k;
       vec2 away = seed.xz - uPlayer.xz;   // grass bends away from the player
       float push = (1.0 - smoothstep(0.35, 1.5, length(away))) * position.y;
       mvPosition.xz += normalize(away + 1e-4) * push * 0.55;
@@ -251,22 +246,62 @@ export function buildPark({ scene, physics, R, plots, houses, time }) {
       // Both faces use the up normal: no flipped (dark) back faces.
       .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = normalize(vNormal);');
   };
-  const grass = new THREE.InstancedMesh(bladeGeo, bladeMat, Math.max(1, blades.length));
   const tilt = new THREE.Euler();
-  blades.forEach(([x, z, h, sNorm], i) => {
-    q.setFromEuler(tilt.set((rand() - 0.5) * 0.45, rand() * 6.28, (rand() - 0.5) * 0.45));
-    grass.setMatrixAt(i, m4.compose(v.set(x, 0, z), q, s3.set(0.8 + rand() * 0.6, h, 1)));
-    grass.setColorAt(i, groundColor(x, z, sNorm, color).multiplyScalar(0.92 + rand() * 0.1));
-  });
-  grass.count = blades.length;
-  grass.receiveShadow = true;
-  grass.computeBoundingSphere();
-  scene.add(grass);
+  function buildGrassChunk(cx, cz) {
+    const step = 0.32, size = GRASS.chunk;
+    const rand = mulberry32((cx * 73856093) ^ (cz * 19349663) ^ 0x5bd1e995);
+    const blades = [];
+    for (let x = cx * size; x < (cx + 1) * size; x += step) for (let z = cz * size; z < (cz + 1) * size; z += step) {
+      const px = x + rand() * step, pz = z + rand() * step;
+      const sNorm = Math.hypot(px, pz) / shoreRadius(Math.atan2(pz, px), R);
+      if (sNorm > 0.9 || Math.hypot(px, pz) < PLAZA_R + 0.6) continue;
+      const clump = 0.5 + 0.5 * Math.sin(px * 0.13 + Math.sin(pz * 0.11) * 2) * Math.cos(pz * 0.12 - px * 0.05);
+      const dense = THREE.MathUtils.smoothstep(clump, 0.45, 0.75);
+      if (rand() > 0.08 + 0.85 * dense) continue; // cheap reject before the costly tests
+      if (nearHouse(px, pz, 4.4) || onPath(px, pz, 0.3) || isFloor(px, pz)) continue;
+      const edge = nearFloor(px, pz, 1.0);
+      const h = edge ? 0.7 + rand() * 0.5 : 0.25 + dense * 0.65 + rand() * 0.25;
+      blades.push([px, pz, h, sNorm]);
+    }
+    if (!blades.length) return null;
+    const grass = new THREE.InstancedMesh(bladeGeo, bladeMat, blades.length);
+    blades.forEach(([x, z, h, sNorm], i) => {
+      q.setFromEuler(tilt.set((rand() - 0.5) * 0.45, rand() * 6.28, (rand() - 0.5) * 0.45));
+      grass.setMatrixAt(i, m4.compose(v.set(x, 0, z), q, s3.set(0.8 + rand() * 0.6, h, 1)));
+      grass.setColorAt(i, groundColor(x, z, sNorm, color).multiplyScalar(0.92 + rand() * 0.1));
+    });
+    grass.receiveShadow = true;
+    grass.computeBoundingSphere();
+    grass.visible = grassGrow.value > 0;
+    scene.add(grass);
+    return grass;
+  }
+  const grassChunks = new Map(); // "cx,cz" -> InstancedMesh | null (empty square)
+  function streamGrass(position) {
+    const size = GRASS.chunk, pcx = Math.floor(position.x / size), pcz = Math.floor(position.z / size);
+    const reach = Math.ceil(GRASS.radius / size), wanted = [];
+    for (let i = -reach; i <= reach; i++) for (let j = -reach; j <= reach; j++) {
+      const cx = pcx + i, cz = pcz + j, key = cx + ',' + cz;
+      if (grassChunks.has(key)) continue;
+      const d = Math.hypot((cx + 0.5) * size - position.x, (cz + 0.5) * size - position.z);
+      if (d < GRASS.radius) wanted.push([d, cx, cz, key]);
+    }
+    wanted.sort((a, b) => a[0] - b[0]);
+    for (const [, cx, cz, key] of wanted.slice(0, GRASS.perFrame)) grassChunks.set(key, buildGrassChunk(cx, cz));
+    for (const [key, mesh] of grassChunks) {
+      const [cx, cz] = key.split(',').map(Number);
+      if (Math.hypot((cx + 0.5) * size - position.x, (cz + 0.5) * size - position.z) <= GRASS.keep) continue;
+      if (mesh) { scene.remove(mesh); mesh.dispose(); }
+      grassChunks.delete(key);
+    }
+  }
   return {
-    bladeCount: blades.length,
     // 0 = walking view, 1 = minimap: grass shrinks into the ground like the leaves fade.
-    setFlat(p) { grassGrow.value = 1 - THREE.MathUtils.smoothstep(p, 0.1, 0.5); grass.visible = grassGrow.value > 0; },
-    setPlayer(position) { grassPlayer.value.copy(position); },
+    setFlat(p) {
+      grassGrow.value = 1 - THREE.MathUtils.smoothstep(p, 0.1, 0.5);
+      for (const mesh of grassChunks.values()) if (mesh) mesh.visible = grassGrow.value > 0;
+    },
+    setPlayer(position) { grassPlayer.value.copy(position); streamGrass(position); },
     setViewport: fountain.setViewport,
   };
 }

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { pop } from './shape-tree.js';
+import { WIND_GLSL, windUniforms } from './wind.js';
 
 // All placeholder colours in one place; sprites/colours are meant to be replaced later.
 export const PALETTE = {
@@ -8,32 +9,60 @@ export const PALETTE = {
   tile: [0xf2ede2, 0xebe5d8, 0xe4ddcf],     // plain stone
   tileInk: [0xdcd3c2, 0xd5cbb9, 0xcec4b1],  // text cells: faintly darker, readable in 3D
 };
-// Replace with an RGBA PNG; alphaTest clips transparent pixels.
-export const LEAF_TEXTURE_URL = './assets/textures/leaf-maple-lowpoly.svg';
+// Foliage sprite: a distance field of a clump of small diamond leaves (red channel = distance to
+// the nearest leaf edge). From bruno-simon.com (github.com/brunosimon/folio-2025, MIT, see
+// assets/textures/third-party/LICENSE-folio-2025.md). Cut at LEAF_THRESHOLD: lower = fatter leaves.
+export const FOLIAGE_TEXTURE_URL = './assets/textures/third-party/foliage-sdf-bruno-simon.png';
+export const LEAF_THRESHOLD = 0.3;
+export const LEAF_SIZE = 1.2;  // quad size (m); each quad shows a clump of ~20 small leaves
+// garden.js places the sun at target + SUN_OFFSET; foliage two-tone uses the same direction.
+export const SUN_OFFSET = new THREE.Vector3(-28, 55, 22);
+const SUN_DIR = SUN_OFFSET.clone().normalize();
 export const wind = { value: 0 }; // shared time uniform, advanced by the render loop
 // User-tunable (settings panel): trees grow within growRange m, shrink beyond growRange + 15 m.
-export const treeSettings = { growRange: 40 };
+export const treeSettings = { growRange: 40, buildsPerFrame: 4 }; // buildsPerFrame: streaming budget
+// Filler leaves (shape-tree.js) complete the crown for the walking camera only. garden.js drives
+// fillerFade (1 = visible, 0 = gone) from the camera's downward angle; they are drawn bigger.
+export const fillerFade = { value: 1 };
+// Branch visibility (1 = shown); garden.js follows fillerFade only outside the walking view, so
+// branches never cross the text from above but trunks stay when the walking camera looks down.
+export const barkFade = { value: 1 };
+// Camera -> player distance while walking (0 = off): leaves closer to the camera than the player
+// are dropped, so crowns never hide the character (Bruno's foliage "see-through").
+export const seeThrough = { value: 0 };
+export const FILLER_SCALE = 1.3;
+// 0..1 when the minimap is zoomed far out: voxels and tiles grow to close their sub-pixel gaps
+// (which flickered while panning) and tile colours flatten so the text stays crisp.
+export const mapFill = { value: 0 };
 
 const MARGIN = 4;        // stone border around the text, in cells
-const SIDES = 7;         // low-poly branch cross-section
+const SIDES = 8;         // low-poly branch cross-section (smooth radial normals hide the facets)
 const hash = (x, z) => { const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return s - Math.floor(s); };
 const pick = (list, r) => list[Math.floor(r * list.length) % list.length];
 const smoothstep = THREE.MathUtils.smoothstep;
+// 4x4 ordered-dither threshold in [0, 1): screen-door fading without transparency sorting.
+const BAYER_GLSL = `
+  float bayer2(vec2 v) { return mod(2.0 * v.x + 3.0 * v.y, 4.0); }
+  float bayer4(vec2 p) { p = mod(floor(p), 4.0); return (4.0 * bayer2(mod(p, 2.0)) + bayer2(floor(p / 2.0)) + 0.5) / 16.0; }`;
 
-function loadTexture(url) {
+// isColor = false for data textures (masks, distance fields): no sRGB decoding.
+function loadTexture(url, isColor = true) {
   const texture = new THREE.TextureLoader().load(url);
-  texture.colorSpace = THREE.SRGBColorSpace;
+  if (isColor) texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
 }
 
 // Instanced vertex sway, applied after the instance transform. `amount(seed)` is GLSL.
+// `seed` = instance position (mesh-local), `windHere` = shared wind push (wind.js) at its world x/z.
 export function addSway(shader, amount) {
   shader.uniforms.uTime = wind;
-  shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <project_vertex>', `
+  Object.assign(shader.uniforms, windUniforms);
+  shader.vertexShader = `uniform float uTime;\n${WIND_GLSL}\n` + shader.vertexShader.replace('#include <project_vertex>', `
     vec4 mvPosition = vec4(transformed, 1.0);
     #ifdef USE_INSTANCING
       mvPosition = instanceMatrix * mvPosition;
       vec3 seed = instanceMatrix[3].xyz;
+      vec2 windHere = windOffset((modelMatrix * vec4(seed, 1.0)).xz);
       ${amount}
     #endif
     mvPosition = modelViewMatrix * mvPosition;
@@ -48,7 +77,7 @@ function branchGeometry(tree, cluster, root) {
   tree.nodes.forEach((n, i) => { if (n.cluster === cluster) ids.push(i); });
   const primaryChild = new Map();
   for (const i of ids) { const n = tree.nodes[i]; if (n.parent >= 0 && n.primary) primaryChild.set(n.parent, i); }
-  const positions = [], indices = [], rings = new Map();
+  const positions = [], normals = [], indices = [], rings = new Map();
   const v = new THREE.Vector3(), t = new THREE.Vector3(), u = new THREE.Vector3(), w = new THREE.Vector3();
   const pos = (n) => new THREE.Vector3(n.x - root.x, n.y, n.z - root.z);
   const ring = (center, tangent, axis, radius) => {
@@ -56,7 +85,9 @@ function branchGeometry(tree, cluster, root) {
     w.crossVectors(tangent, axis);
     for (let j = 0; j < SIDES; j++) {
       const a = (j / SIDES) * Math.PI * 2;
-      v.copy(axis).multiplyScalar(Math.cos(a) * radius).addScaledVector(w, Math.sin(a) * radius).add(center);
+      v.copy(axis).multiplyScalar(Math.cos(a)).addScaledVector(w, Math.sin(a));
+      normals.push(v.x, v.y, v.z); // radial: smooth shading around the branch
+      v.multiplyScalar(radius).add(center);
       positions.push(v.x, v.y, v.z);
     }
     return start;
@@ -68,7 +99,7 @@ function branchGeometry(tree, cluster, root) {
   const connect = (a, b) => {
     for (let j = 0; j < SIDES; j++) {
       const k = (j + 1) % SIDES;
-      indices.push(a + j, b + j, a + k, a + k, b + j, b + k);
+      indices.push(a + j, a + k, b + j, a + k, b + k, b + j); // counter-clockwise from outside
     }
   };
   for (const i of ids) {
@@ -76,7 +107,9 @@ function branchGeometry(tree, cluster, root) {
     t.set(0, 0, 0);
     if (n.parent >= 0) t.add(pos(n).sub(pos(tree.nodes[n.parent])).normalize());
     if (primaryChild.has(i)) t.add(pos(tree.nodes[primaryChild.get(i)]).sub(p).normalize());
-    if (t.lengthSq() < 1e-8) t.set(0, 1, 0);
+    // The root ring lies flat (it is buried below the ground): a ring perpendicular to a leaning
+    // trunk would lift one side out of the ground and leave a visible gap.
+    if (t.lengthSq() < 1e-8 || n.parent < 0) t.set(0, 1, 0);
     t.normalize();
     const parentRing = n.parent >= 0 && n.primary ? rings.get(n.parent) : null;
     if (parentRing) u.copy(parentRing.axis).addScaledVector(t, -parentRing.axis.dot(t));
@@ -93,90 +126,163 @@ function branchGeometry(tree, cluster, root) {
     if (!primaryChild.has(i) && !ids.some((c) => tree.nodes[c].parent === i)) {
       const tip = positions.length / 3;
       positions.push(p.x, p.y, p.z);
+      normals.push(t.x, t.y, t.z);
       for (let j = 0; j < SIDES; j++) indices.push(index + j, index + (j + 1) % SIDES, tip);
     }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geo.setIndex(indices);
-  geo.computeVertexNormals();
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
   geo.computeBoundingSphere();
   return geo;
 }
 
-// tree: growTree() output. The floor is an organic low-poly patch around the text.
-export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, seed = 0 } = {}) {
+// forest: planForest() output; mask may carry `kind` (0 = title/lines, 1 = body) per cell.
+// Trees stream: a tree's branches and leaves are built (forest.build) only when it enters the grow
+// range, at most treeSettings.buildsPerFrame per frame, nearest first, and freed again once it has
+// shrunk away. Floor tiles and voxels are split into CHUNK x CHUNK cell meshes, so off-screen parts
+// are frustum-culled. The floor is an organic low-poly patch around the text.
+const CHUNK = 32;
+export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors = colors, seed = 0 } = {}) {
+  const byLightness = (list) => [...list].sort((a, b) => new THREE.Color(a).getHSL({}).l - new THREE.Color(b).getHSL({}).l);
+  const tonesByKind = [byLightness(colors), byLightness(bodyColors)];
   // Darkest palette colour gives the most contrast against the pale tiles.
-  const voxelHex = [...colors].sort((a, b) => new THREE.Color(a).getHSL({}).l - new THREE.Color(b).getHSL({}).l)[0];
-  const group = new THREE.Group(), resources = [], meshes = [];
+  const voxelHexByKind = tonesByKind.map((tones) => tones[0]);
+  const group = new THREE.Group(), resources = [];
   const keep = (x) => { resources.push(x); return x; };
   const matrix = new THREE.Matrix4(), position = new THREE.Vector3(), scale = new THREE.Vector3();
-  const rotation = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+  const rotation = new THREE.Quaternion();
   const color = new THREE.Color();
 
   // ---------- Branches: plain colour, fade out first when looking down ----------
-  const bark = keep(new THREE.MeshLambertMaterial({ color: PALETTE.bark, side: THREE.DoubleSide }));
+  // Front faces only: outward normals keep the shadow normal-bias on the right side (no acne).
+  const bark = keep(new THREE.MeshLambertMaterial({ color: PALETTE.bark }));
+  // Branches dissolve (ordered dither) with barkFade: outside the walking view they would cross the text.
+  bark.onBeforeCompile = (shader) => {
+    shader.uniforms.uBarkFade = barkFade;
+    shader.fragmentShader = `uniform float uBarkFade;\n${BAYER_GLSL}\n` + shader.fragmentShader
+      .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\nif (bayer4(gl_FragCoord.xy) >= uBarkFade) discard;');
+  };
   // Invisible crown proxies cast the canopy shadow instead of every leaf.
   const shadowOnly = keep(new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false }));
   const crownGeo = keep(new THREE.IcosahedronGeometry(1, 1));
-  const crowns = []; // plot-local crown boxes, used by the falling-leaf particles
-  const trunks = tree.roots.map((root, cluster) => {
-    const mesh = new THREE.Mesh(keep(branchGeometry(tree, cluster, root)), bark);
-    mesh.position.set(root.x, 0, root.z);
-    mesh.castShadow = mesh.receiveShadow = true;
-    const crown = new THREE.Box3();
-    for (const leaf of tree.leaves) if (leaf.cluster === cluster) crown.expandByPoint(position.set(leaf.x - root.x, leaf.y, leaf.z - root.z));
-    if (!crown.isEmpty()) {
-      crowns.push({ cluster, box: crown.clone().translate(new THREE.Vector3(root.x, 0, root.z)) });
-      const proxy = new THREE.Mesh(crownGeo, shadowOnly);
-      crown.getCenter(proxy.position);
-      crown.getSize(proxy.scale).multiplyScalar(0.42);
-      proxy.castShadow = true;
-      mesh.add(proxy);
-    }
-    group.add(mesh);
-    return mesh;
-  });
+  // Plot-local crown boxes (known before trees are built), used by the falling-leaf particles.
+  const crowns = forest.boxes.map((b, cluster) => ({ cluster, box: new THREE.Box3(new THREE.Vector3(b.min.x, b.min.y, b.min.z), new THREE.Vector3(b.max.x, b.max.y, b.max.z)) }));
 
   // ---------- Leaves: one instanced mesh per tree, swaying, fading via uFade ----------
   const fade = { value: 1 }, sink = { value: 0 };
-  const leafMaterial = keep(new THREE.MeshLambertMaterial({ map: keep(loadTexture(LEAF_TEXTURE_URL)), alphaTest: 0.45, side: THREE.DoubleSide }));
-  leafMaterial.onBeforeCompile = (shader) => {
-    addSway(shader, `
-      float phase = seed.x * 0.43 + seed.z * 0.31;
-      float h = clamp(seed.y / 10.0, 0.0, 1.0);
-      mvPosition.x += sin(uTime * 1.3 + phase) * 0.12 * h + sin(uTime * 4.1 + phase * 7.0) * 0.03;
-      mvPosition.z += cos(uTime * 1.1 + phase) * 0.09 * h;
-      mvPosition.y += sin(uTime * 3.3 + phase * 5.0) * 0.025;
-      mvPosition.y = mix(mvPosition.y, -1.2 + position.y * 0.1, uSink);`);
-    shader.uniforms.uSink = sink;
-    shader.vertexShader = 'uniform float uSink;\n' + shader.vertexShader;
-    // Opacity is applied AFTER the cutout test, so the leaf shape stays while it fades.
-    shader.uniforms.uFade = fade;
-    shader.fragmentShader = 'uniform float uFade;\n' + shader.fragmentShader
-      .replace('#include <alphatest_fragment>', '#include <alphatest_fragment>\ndiffuseColor.a *= uFade;');
-  };
-  const leafGeo = keep(new THREE.PlaneGeometry(0.9, 0.9)); // maple sprite fills ~90% of the quad
-  const foliage = tree.roots.map((root, cluster) => {
-    // Canopy-only cells have fewer leaves; retain every entry without fixed-size cell grouping.
-    const ordered = tree.leaves.filter((leaf) => leaf.cluster === cluster);
-    const mesh = new THREE.InstancedMesh(leafGeo, leafMaterial, ordered.length);
-    mesh.receiveShadow = true;
-    ordered.forEach((leaf, i) => mesh.setColorAt(i, color.setHex(pick(colors, leaf.shade))));
-    const bounds = new THREE.Box3().expandByPoint(new THREE.Vector3(root.x, 0, root.z));
-    for (const leaf of ordered) bounds.expandByPoint(position.set(
-      root.x + (leaf.x - root.x) * 1.2, leaf.y * 1.2 + 1, root.z + (leaf.z - root.z) * 1.2));
-    mesh.boundingSphere = bounds.expandByScalar(1).getBoundingSphere(new THREE.Sphere());
-    group.add(mesh); meshes.push(mesh);
-    return { mesh, entries: ordered, time: 0, active: false, dirty: true,
-      rotations: ordered.map((l) => new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2 + l.tilt, 0, l.yaw, 'XYZ'))) };
+  const alphaMap = keep(loadTexture(FOLIAGE_TEXTURE_URL, false));
+  // Two-tone foliage (after Bruno's Foliage.js): colour = mix(darkest, lightest colour) by how much
+  // the crown normal faces the sun; instance colours only add a small brightness variation.
+  function leafMaterialFor(tones) {
+    const material = keep(new THREE.MeshLambertMaterial({ alphaMap, alphaTest: LEAF_THRESHOLD, side: THREE.DoubleSide }));
+    material.onBeforeCompile = (shader) => {
+      // Crowns lean downwind with the gusts; the sprite UV turns with the gust strength, so the
+      // small leaves inside each clump shimmer (Bruno rotates the foliage UV the same way).
+      addSway(shader, `
+        float h = clamp(seed.y / 10.0, 0.0, 1.0);
+        mvPosition.xz += windHere * 0.35 * h;
+        mvPosition.y += sin(uTime * 3.3 + seed.x * 2.1 + seed.z * 1.7) * 0.025;
+        vLeafSpin = length(windHere) * 2.2 + seed.x * 0.37 + seed.z * 0.51;
+        vLeafRand = fract(sin(dot(seed.xz, vec2(12.9898, 78.233)) + seed.y) * 43758.5453);
+        mvPosition.y = mix(mvPosition.y, -1.2 + position.y * 0.1, uSink);`);
+      shader.uniforms.uSink = sink;
+      shader.uniforms.uSunDir = { value: SUN_DIR };
+      shader.uniforms.uLeafA = { value: new THREE.Color(tones[0]) };
+      shader.uniforms.uLeafB = { value: new THREE.Color(tones[tones.length - 1]) };
+      // Lighting uses the crown normal (aCrown), not the quad's own orientation: leaves keep random
+      // orientations (no edge-on slivers on the silhouette) while the crown shades like one mass.
+      shader.vertexShader = 'uniform float uSink;\nuniform vec3 uSunDir;\nattribute float aFiller;\nattribute vec3 aCrown;\nvarying float vFiller, vLeafSpin, vLeafLight, vLeafRand, vViewDepth;\n' + shader.vertexShader
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvFiller = aFiller;\nvLeafLight = smoothstep(0.0, 1.0, dot(normalize(aCrown), uSunDir));')
+        .replace('#include <fog_vertex>', '#include <fog_vertex>\nvViewDepth = -mvPosition.z;')
+        .replace('#include <defaultnormal_vertex>', '#include <defaultnormal_vertex>\ntransformedNormal = normalize(normalMatrix * aCrown);');
+      // Opacity is applied AFTER the cutout test, so the leaf shape stays while it fades.
+      // Filler leaves drop out leaf by leaf as fillerFade falls (stays opaque, keeps depth writes).
+      shader.uniforms.uFade = fade;
+      shader.uniforms.uFillerFade = fillerFade;
+      shader.uniforms.uSeeThrough = seeThrough;
+      shader.fragmentShader = `uniform float uFade, uFillerFade, uSeeThrough;\nuniform vec3 uLeafA, uLeafB;\nvarying float vFiller, vLeafSpin, vLeafLight, vLeafRand, vViewDepth;\n` + shader.fragmentShader
+        .replace('#include <alphamap_fragment>', `
+          vec2 leafUv = vAlphaMapUv - 0.5;
+          float cs = cos(vLeafSpin), sn = sin(vLeafSpin);
+          leafUv = vec2(cs * leafUv.x - sn * leafUv.y, sn * leafUv.x + cs * leafUv.y) + 0.5;
+          diffuseColor.a *= texture2D(alphaMap, leafUv).r;`)
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb *= mix(uLeafA, uLeafB, vLeafLight);')
+        .replace('#include <alphatest_fragment>', `#include <alphatest_fragment>
+          // Whole leaves drop out one by one (random threshold per leaf), no screen-door dots.
+          if (vFiller > 0.5 && vLeafRand >= uFillerFade) discard;
+          if (vViewDepth < uSeeThrough - 0.4 - vLeafRand) discard;
+          diffuseColor.a *= uFade;`)
+        // Both faces of a leaf take the crown normal (no back-face flip).
+        .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = normalize(vNormal);');
+    };
+    return material;
+  }
+  const leafMaterials = tonesByKind.map(leafMaterialFor);
+  const leafGeo = keep(new THREE.PlaneGeometry(LEAF_SIZE, LEAF_SIZE));
+
+  // ---------- Trees: planned up front, built on demand ----------
+  const trees = forest.roots.map((root, i) => {
+    const b = forest.boxes[i];
+    // Bounds cover the 1.2x pop overshoot around the root.
+    const box = new THREE.Box3(
+      new THREE.Vector3(root.x + (b.min.x - root.x) * 1.2, -0.5, root.z + (b.min.z - root.z) * 1.2),
+      new THREE.Vector3(root.x + (b.max.x - root.x) * 1.2, b.max.y * 1.2 + 1, root.z + (b.max.z - root.z) * 1.2));
+    return { root, kind: forest.crowns[i].kind, bounds: box.getBoundingSphere(new THREE.Sphere()), time: 0, active: false, built: null, dirty: true };
   });
+  function buildTree(i) {
+    const t = trees[i], data = forest.build(i);
+    const trunk = new THREE.Mesh(branchGeometry({ nodes: data.nodes }, i, t.root), bark);
+    trunk.position.set(t.root.x, 0, t.root.z);
+    trunk.castShadow = trunk.receiveShadow = true;
+    const b = forest.boxes[i];
+    const proxy = new THREE.Mesh(crownGeo, shadowOnly);
+    proxy.position.set((b.min.x + b.max.x) / 2 - t.root.x, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2 - t.root.z);
+    proxy.scale.set((b.max.x - b.min.x) * 0.36, (b.max.y - b.min.y) * 0.42, (b.max.z - b.min.z) * 0.36);
+    proxy.castShadow = true;
+    trunk.add(proxy);
+    // Per-tree copy of the 4-vertex quad carrying per-leaf filler flag and crown normal.
+    const entries = data.leaves;
+    const geometry = leafGeo.clone();
+    geometry.setAttribute('aFiller', new THREE.InstancedBufferAttribute(Float32Array.from(entries, (l) => (l.filler ? 1 : 0)), 1));
+    geometry.setAttribute('aCrown', new THREE.InstancedBufferAttribute(Float32Array.from(entries.flatMap((l) => [l.nx, l.ny, l.nz])), 3));
+    const leaves = new THREE.InstancedMesh(geometry, leafMaterials[t.kind], entries.length);
+    leaves.receiveShadow = true;
+    entries.forEach((leaf, k) => leaves.setColorAt(k, color.setScalar(0.9 + leaf.shade * 0.2)));
+    leaves.boundingSphere = t.bounds.clone();
+    group.add(trunk, leaves);
+    // Random spin in the leaf plane, tilt up to ~72 degrees from flat, random heading.
+    const rotations = entries.map((l) => new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2 + l.tilt, l.yaw, l.shade * 6.28, 'YXZ')));
+    t.built = { trunk, leaves, entries, rotations };
+    t.dirty = true;
+  }
+  function freeTree(i) {
+    const { trunk, leaves } = trees[i].built;
+    group.remove(trunk, leaves);
+    trunk.geometry.dispose(); leaves.geometry.dispose(); leaves.dispose();
+    trees[i].built = null;
+  }
+  function updateTree(i) {
+    const t = trees[i], { trunk: trunkMesh, leaves, entries, rotations } = t.built, root = t.root;
+    const trunk = pop((t.time - root.delay) / 0.65);
+    trunkMesh.scale.setScalar(trunk.scale);
+    trunkMesh.position.y = trunk.lift;
+    const p = pop((t.time - root.delay - 0.7) / 0.65);
+    entries.forEach((leaf, k) => {
+      position.set(root.x + (leaf.x - root.x) * trunk.scale, leaf.y * trunk.scale + trunk.lift + p.lift, root.z + (leaf.z - root.z) * trunk.scale);
+      leaves.setMatrixAt(k, matrix.compose(position, rotations[k], scale.setScalar(p.scale * trunk.scale * (leaf.filler ? FILLER_SCALE : 1))));
+    });
+    leaves.instanceMatrix.needsUpdate = true;
+    t.dirty = false;
+  }
 
   // ---------- Floor: organic patch of stone tiles (rounded, noisy outline) ----------
   // Same parity as the mask so mask cells land exactly on tile centres.
   const cols = mask.w + 2 * MARGIN, rows = mask.h + 2 * MARGIN;
   const col0 = MARGIN, row0 = MARGIN;
   const inkAt = (c, r) => { const mc = c - col0, mr = r - row0; return mc >= 0 && mr >= 0 && mc < mask.w && mr < mask.h && mask.cells[mr * mask.w + mc]; };
+  const kindAt = (c, r) => (mask.kind ? mask.kind[(r - row0) * mask.w + (c - col0)] : 0);
   const nearInk = (c, r) => { for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) if (inkAt(c + dc, r + dr)) return true; return false; };
   // 1. Organic outline.
   const inside = new Uint8Array(cols * rows);
@@ -211,96 +317,112 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, seed = 0 } =
     }
     floorCells.push({ x, z, ink, rnd, wear });
     floorKeys.add(`${x},${z}`);
-    if (ink) voxelCells.push({ x, z, rnd });
+    if (ink) voxelCells.push({ x, z, kind: kindAt(c, r) });
   }
+  // Split instances into CHUNK x CHUNK cell meshes (frustum culling per chunk).
+  const chunked = (items, makeMesh) => {
+    const byKey = new Map();
+    for (const item of items) {
+      const k = `${Math.floor(item.x / CHUNK)},${Math.floor(item.z / CHUNK)}`;
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k).push(item);
+    }
+    return [...byKey.values()].map((list) => { const mesh = makeMesh(list); mesh.computeBoundingSphere(); group.add(mesh); return mesh; });
+  };
   const tileGeo = keep(new THREE.BoxGeometry(0.98, 0.1, 0.98));
-  const tiles = new THREE.InstancedMesh(tileGeo, keep(new THREE.MeshLambertMaterial()), floorCells.length + chips.length);
+  const tileMaterial = keep(new THREE.MeshLambertMaterial());
+  tileMaterial.onBeforeCompile = (shader) => {
+    shader.uniforms.uFill = mapFill;
+    shader.uniforms.uFlat = { value: new THREE.Color(PALETTE.tile[0]) };
+    shader.vertexShader = 'uniform float uFill;\n' + shader.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.xz *= mix(1.0, 1.0 / 0.98, uFill);');
+    shader.fragmentShader = 'uniform float uFill;\nuniform vec3 uFlat;\n' + shader.fragmentShader
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, uFlat, uFill * 0.6);');
+  };
   const worn = new THREE.Color(0xb9b49a); // weathered, mossy stone at the border
-  floorCells.forEach((cell, i) => {
-    const w = cell.wear;
-    rotation.setFromEuler(new THREE.Euler((cell.rnd - 0.5) * 0.12 * w, (cell.rnd - 0.5) * 0.5 * w, 0));
-    tiles.setMatrixAt(i, matrix.compose(position.set(cell.x, 0.01 + cell.rnd * 0.025 - w * 0.03, cell.z), rotation, scale.set(1 - w * 0.25, 1, 1 - w * 0.2)));
-    tiles.setColorAt(i, color.setHex(pick(cell.ink ? PALETTE.tileInk : PALETTE.tile, cell.rnd)).lerp(worn, w * 0.5));
+  const tileMeshes = chunked([...floorCells.map((cell) => ({ ...cell, chip: false })), ...chips.map((chip) => ({ ...chip, chip: true }))], (list) => {
+    const tiles = new THREE.InstancedMesh(tileGeo, tileMaterial, list.length);
+    list.forEach((cell, i) => {
+      if (cell.chip) {
+        rotation.setFromEuler(new THREE.Euler(0, cell.rnd * 6.28, 0));
+        tiles.setMatrixAt(i, matrix.compose(position.set(cell.x, -0.01, cell.z), rotation, scale.set(cell.size, 0.8, cell.size * 0.8)));
+        tiles.setColorAt(i, color.setHex(pick(PALETTE.tile, cell.rnd)).lerp(worn, 0.4));
+        return;
+      }
+      const w = cell.wear;
+      rotation.setFromEuler(new THREE.Euler((cell.rnd - 0.5) * 0.12 * w, (cell.rnd - 0.5) * 0.5 * w, 0));
+      tiles.setMatrixAt(i, matrix.compose(position.set(cell.x, 0.01 + cell.rnd * 0.025 - w * 0.03, cell.z), rotation, scale.set(1 - w * 0.25, 1, 1 - w * 0.2)));
+      tiles.setColorAt(i, color.setHex(pick(cell.ink ? PALETTE.tileInk : PALETTE.tile, cell.rnd)).lerp(worn, w * 0.5));
+    });
+    tiles.receiveShadow = true;
+    return tiles;
   });
-  chips.forEach((chip, k) => {
-    rotation.setFromEuler(new THREE.Euler(0, chip.rnd * 6.28, 0));
-    tiles.setMatrixAt(floorCells.length + k, matrix.compose(position.set(chip.x, -0.01, chip.z), rotation, scale.set(chip.size, 0.8, chip.size * 0.8)));
-    tiles.setColorAt(floorCells.length + k, color.setHex(pick(PALETTE.tile, chip.rnd)).lerp(worn, 0.4));
-  });
-  tiles.receiveShadow = true;
-  tiles.computeBoundingSphere();
-  group.add(tiles); meshes.push(tiles);
 
   // ---------- Voxel text: rises from the floor in the top view, replaces the leaves ----------
   const rise = { value: 0 };
   const voxelMaterial = keep(new THREE.MeshLambertMaterial({ transparent: true, opacity: 0, depthWrite: false }));
   voxelMaterial.onBeforeCompile = (shader) => {
     shader.uniforms.uRise = rise;
-    shader.vertexShader = 'uniform float uRise;\n' + shader.vertexShader
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y *= uRise;');
+    shader.uniforms.uFill = mapFill;
+    shader.vertexShader = 'uniform float uRise, uFill;\n' + shader.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y *= uRise;\ntransformed.xz *= mix(1.0, 1.0 / 0.96, uFill);');
   };
   const voxelGeo = keep(new THREE.BoxGeometry(0.96, 0.6, 0.96).translate(0, 0.3, 0));
-  const voxels = new THREE.InstancedMesh(voxelGeo, voxelMaterial, Math.max(1, voxelCells.length));
-  voxelCells.forEach((cell, i) => {
-    // One flat colour and height: the minimap text must read cleanly (leaves stay multicolour).
-    voxels.setMatrixAt(i, matrix.makeTranslation(cell.x, 0.06, cell.z));
-    voxels.setColorAt(i, color.setHex(voxelHex));
+  const voxelMeshes = chunked(voxelCells, (list) => {
+    const voxels = new THREE.InstancedMesh(voxelGeo, voxelMaterial, list.length);
+    // One flat colour per text kind and one height: the minimap text must read cleanly.
+    list.forEach((cell, i) => {
+      voxels.setMatrixAt(i, matrix.makeTranslation(cell.x, 0.06, cell.z));
+      voxels.setColorAt(i, color.setHex(voxelHexByKind[cell.kind]));
+    });
+    voxels.visible = false;
+    voxels.receiveShadow = true;
+    return voxels;
   });
-  voxels.count = voxelCells.length;
-  voxels.visible = false;
-  voxels.receiveShadow = true;
-  voxels.computeBoundingSphere();
-  group.add(voxels); meshes.push(voxels);
 
   // ---------- Animation ----------
   const frustum = new THREE.Frustum(), projection = new THREE.Matrix4(), worldBounds = new THREE.Sphere();
+  const worldRoot = new THREE.Vector3(), queue = [];
   let flat = 0;
-  function updateCluster(cluster) {
-    const item = foliage[cluster], root = tree.roots[cluster];
-    const trunk = pop((item.time - root.delay) / 0.65);
-    trunks[cluster].scale.setScalar(trunk.scale);
-    trunks[cluster].position.y = trunk.lift;
-    const p = pop((item.time - root.delay - 0.7) / 0.65);
-    item.entries.forEach((leaf, i) => {
-      position.set(root.x + (leaf.x - root.x) * trunk.scale,
-        leaf.y * trunk.scale + trunk.lift + p.lift, root.z + (leaf.z - root.z) * trunk.scale);
-      item.mesh.setMatrixAt(i, matrix.compose(position, item.rotations[i], scale.setScalar(p.scale * trunk.scale)));
-    });
-    item.mesh.instanceMatrix.needsUpdate = true;
-    item.dirty = false;
-  }
-
   return {
     group, size: { w: cols, h: rows }, floor: floorCells, crowns,
-    isGrown: (cluster) => foliage[cluster].time >= tree.maxT && foliage[cluster].mesh.visible,
+    isGrown: (cluster) => !!trees[cluster].built && trees[cluster].time >= forest.maxT && trees[cluster].built.leaves.visible,
     // Local plot coordinates -> is this a stone tile? (grass and props avoid the floor)
     isFloor: (x, z) => floorKeys.has(`${Math.round(x + (cols - 1) / 2) - (cols - 1) / 2},${Math.round(z + (rows - 1) / 2) - (rows - 1) / 2}`),
-    // Range activation (hysteresis), frustum culling and view-dependent leaf thinning.
+    // Number of trees currently built (streaming diagnostics).
+    builtCount: () => trees.reduce((n, t) => n + (t.built ? 1 : 0), 0),
+    // Range activation (hysteresis), streaming build/free, frustum culling and growth.
     tick(dt, observer, pinned, instant = false, camera = null) {
+      group.updateMatrixWorld();
       if (camera) {
-        group.updateMatrixWorld();
         projection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
         frustum.setFromProjectionMatrix(projection);
       }
-      const leavesOn = flat < 0.8, barkOn = flat < 0.3;
-      const ratio = 1; // Preserve crown density while it sinks; no instance-count popping.
-      foliage.forEach((item, i) => {
-        const root = tree.roots[i];
-        const distance = Math.hypot(observer.x - group.position.x - root.x, observer.z - group.position.z - root.z);
-        const range = treeSettings.growRange;
-        item.active = pinned || distance < (item.active ? range + 15 : range);
-        const end = item.active ? tree.maxT : 0;
-        const next = instant ? end : THREE.MathUtils.clamp(item.time + Math.sign(end - item.time) * dt, 0, tree.maxT);
-        if (next !== item.time) { item.time = next; item.dirty = true; }
-        worldBounds.copy(item.mesh.boundingSphere).applyMatrix4(group.matrixWorld);
-        const visible = (!camera || frustum.intersectsSphere(worldBounds)) && item.time > 0;
-        if (visible && leavesOn && item.dirty) updateCluster(i);
-        item.mesh.visible = visible && leavesOn;
-        trunks[i].visible = visible && barkOn;
-        item.mesh.count = Math.ceil(item.entries.length * ratio);
+      const leavesOn = flat < 0.8, barkOn = flat < 0.3, range = treeSettings.growRange;
+      queue.length = 0;
+      trees.forEach((t, i) => {
+        worldRoot.set(t.root.x, 0, t.root.z).applyMatrix4(group.matrixWorld);
+        const distance = Math.hypot(observer.x - worldRoot.x, observer.z - worldRoot.z);
+        worldBounds.copy(t.bounds).applyMatrix4(group.matrixWorld);
+        const inView = !camera || frustum.intersectsSphere(worldBounds);
+        t.active = (pinned && inView) || distance < (t.active ? range + 15 : range);
+        // Nothing to show in the flat minimap: do not build there, voxels carry the text.
+        if (!t.built) { if (t.active && leavesOn) queue.push([distance, i]); return; }
+        const end = t.active ? forest.maxT : 0;
+        const next = instant ? end : THREE.MathUtils.clamp(t.time + Math.sign(end - t.time) * dt, 0, forest.maxT);
+        if (next !== t.time) { t.time = next; t.dirty = true; }
+        if (t.time === 0 && !t.active) { freeTree(i); return; }
+        const visible = inView && t.time > 0;
+        if (visible && leavesOn && t.dirty) updateTree(i);
+        t.built.leaves.visible = visible && leavesOn;
+        t.built.trunk.visible = visible && barkOn;
       });
+      // Nearest trees first, a few per frame (instant = reduced motion: build everything due).
+      queue.sort((a, b) => a[0] - b[0]);
+      const budget = instant ? queue.length : treeSettings.buildsPerFrame;
+      for (let k = 0; k < Math.min(budget, queue.length); k++) buildTree(queue[k][1]);
     },
-    setGrowth(t) { foliage.forEach((item) => { item.time = Math.min(tree.maxT, t); item.dirty = true; }); },
+    setGrowth(t) { trees.forEach((tree) => { if (tree.built) { tree.time = Math.min(forest.maxT, t); tree.dirty = true; } }); },
     // 0 = 3D trees, 1 = voxel text. Branches go first, leaves fade and thin, voxels rise.
     setFlat(p) {
       flat = p;
@@ -308,13 +430,16 @@ export function buildTreeScene(tree, mask, { colors = PALETTE.leaf, seed = 0 } =
       bark.transparent = bark.opacity < 1;
       sink.value = smoothstep(p, 0.05, 0.8);
       fade.value = 1 - smoothstep(p, 0.65, 0.8);
-      leafMaterial.transparent = fade.value < 1;
-      leafMaterial.depthWrite = fade.value === 1;
+      for (const m of leafMaterials) { m.transparent = fade.value < 1; m.depthWrite = fade.value === 1; }
       rise.value = 1;
       voxelMaterial.opacity = smoothstep(p, 0.05, 0.5);
       voxelMaterial.depthWrite = voxelMaterial.opacity === 1;
-      voxels.visible = voxelMaterial.opacity > 0;
+      for (const v of voxelMeshes) v.visible = voxelMaterial.opacity > 0;
     },
-    dispose() { resources.forEach((r) => r.dispose()); meshes.forEach((m) => m.dispose()); },
+    dispose() {
+      trees.forEach((t, i) => { if (t.built) freeTree(i); });
+      resources.forEach((r) => r.dispose());
+      [...tileMeshes, ...voxelMeshes].forEach((m) => m.dispose());
+    },
   };
 }

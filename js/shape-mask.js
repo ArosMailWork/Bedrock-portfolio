@@ -40,6 +40,49 @@ export async function maskFromPixelFont(text, { fontUrl = 'assets/fonts/Jersey10
   return { w, h, cells };
 }
 
+// Paragraphs in the same pixel font, word-wrapped to `maxWidth` font pixels, drawn white on a
+// transparent canvas (maskFromBody samples it). 1 font pixel = `scale` canvas pixels (crisp edges
+// when sampled). Size is returned in font pixels.
+export const BODY_LINE_PX = 14;  // 10 px glyphs + descent + leading
+export async function bodyCanvas(paragraphs, { maxWidth, fontUrl = 'assets/fonts/Jersey10-Regular.ttf' } = {}) {
+  await loadPixelFont(fontUrl);
+  const measure = document.createElement('canvas').getContext('2d');
+  measure.font = `${1 / FONT_PIXEL_EM}px JerseyGrid`; // 1 canvas px = 1 font pixel while measuring
+  const lines = [];
+  paragraphs.forEach((paragraph, p) => {
+    if (p) lines.push(''); // blank line between paragraphs
+    let line = '';
+    for (const word of paragraph.split(/\s+/).filter(Boolean)) {
+      const next = line ? `${line} ${word}` : word;
+      if (line && measure.measureText(next).width > maxWidth) { lines.push(line); line = word; } else line = next;
+    }
+    if (line) lines.push(line);
+  });
+  const width = Math.ceil(Math.max(1, ...lines.map((l) => measure.measureText(l).width)));
+  const height = lines.length * BODY_LINE_PX;
+  const scale = Math.max(1, Math.min(4, Math.floor(4096 / Math.max(width, height))));
+  const canvas = document.createElement('canvas');
+  canvas.width = width * scale; canvas.height = height * scale;
+  const ctx = canvas.getContext('2d');
+  ctx.font = `${scale / FONT_PIXEL_EM}px JerseyGrid`;
+  ctx.fillStyle = '#fff';
+  lines.forEach((line, i) => ctx.fillText(line, 0, (i * BODY_LINE_PX + 11) * scale));
+  return { canvas, width, height };
+}
+
+// Body paragraphs as a mask (one cell per font pixel), like maskFromPixelFont for a whole page.
+export async function maskFromBody(paragraphs, options) {
+  const { canvas, width, height } = await bodyCanvas(paragraphs, options);
+  const scale = canvas.width / width;
+  const { data } = canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, canvas.width, canvas.height);
+  const cells = new Uint8Array(width * height);
+  for (let r = 0; r < height; r++) for (let c = 0; c < width; c++) {
+    const px = Math.floor((c + 0.5) * scale), py = Math.floor((r + 0.5) * scale);
+    cells[r * width + c] = data[(py * canvas.width + px) * 4 + 3] > 127 ? 1 : 0;
+  }
+  return { w: width, h: height, cells };
+}
+
 // Any image / canvas, letterboxed into a res x res grid. A cell is on when the pixel is
 // opaque and dark: alpha * (1 - luminance) > threshold (`invert` for light shapes).
 export function maskFromImage(img, { res = 32, threshold = 0.5, invert = false } = {}) {

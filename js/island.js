@@ -112,7 +112,9 @@ export function buildWater(R, time) {
       }`,
   });
   material.uniforms.uTime = time;
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1600, 1600).rotateX(-Math.PI / 2), material);
+  // Sized with the island, so its edge stays beyond the farthest minimap view.
+  const size = Math.max(1600, R * 8);
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(size, size).rotateX(-Math.PI / 2), material);
   mesh.position.y = WATER_Y;
   return mesh;
 }
