@@ -50,8 +50,10 @@ const windLines = createWindLines(scene);
 
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 900);
 const marker = document.querySelector('#plot-marker');
+// The render loop owns the marker's visibility; hiding plays its outro (garden.css hud-out) first.
+const MARKER_OUTRO = 0.25;
+let markerLeftAt = 0;
 const viewToggle = document.querySelector('#view-toggle');
-const info = document.querySelector('#plot-info');
 const settingsToggle = document.querySelector('#settings-toggle');
 const settingsPanel = document.querySelector('#settings');
 const growRange = document.querySelector('#grow-range');
@@ -75,7 +77,7 @@ const stage = {
     if (focus || mode !== 'walk' || transition) return false;
     focus = { eye: eye.clone(), look: look.clone(), onExit };
     keys.clear(); boost.on = false; dragging = false;
-    viewToggle.disabled = true; marker.hidden = true;
+    viewToggle.disabled = true;
     return true;
   },
   release() {
@@ -243,11 +245,10 @@ function beginView(toMap, plot = null) {
   keys.clear();
   dragging = false;
   viewToggle.disabled = true;
-  marker.hidden = true;
   if (toMap) {
     const destination = plot ? new THREE.Vector3(plot.x, 0, plot.z) : new THREE.Vector3(player.position.x, 0, player.position.z);
     startTransition(true, destination, plot ? Math.max(MAP_HEIGHT, plotViewSize(plot)) : MAP_HEIGHT);
-    document.body.classList.add('map-view'); info.hidden = false;
+    document.body.classList.add('map-view');
     return;
   }
   // Leaving: one flight from the current top-down view straight down to the player. Only if the
@@ -264,6 +265,8 @@ function beginView(toMap, plot = null) {
 marker.onclick = () => beginView(true, nearby);
 // One toggle: map icon while walking, camera icon in the minimap.
 viewToggle.onclick = () => beginView(mode === 'walk');
+// The minimap panel takes the heading's place in map view, so it carries its own way back.
+document.querySelector('#map-return').onclick = () => beginView(false);
 settingsToggle.onclick = () => {
   settingsPanel.hidden = !settingsPanel.hidden;
   settingsToggle.setAttribute('aria-expanded', String(!settingsPanel.hidden));
@@ -626,7 +629,6 @@ async function init() {
           mode = 'map';
         } else {
           mode = 'walk';
-          info.hidden = true;
           document.body.classList.remove('map-view');
         }
         transition = null;
@@ -654,10 +656,15 @@ async function init() {
     seeThrough.value = mode === 'walk' && !transition && !focus ? camera.position.distanceTo(player.position) : 0;
 
     nearby = mode === 'walk' && !focus ? plots.find((plot) => plot.entrance.distanceTo(player.position) < 6) || null : null;
-    marker.hidden = !nearby;
-    if (nearby) {
-      projected.copy(nearby.entrance); projected.y = 2.4; projected.project(camera);
-      marker.hidden = Math.abs(projected.x) > 0.95 || Math.abs(projected.y) > 0.95 || projected.z > 1 || projected.z < -1;
+    if (nearby) projected.copy(nearby.entrance).setY(2.4).project(camera);
+    const showMarker = nearby && Math.abs(projected.x) <= 0.95 && Math.abs(projected.y) <= 0.95 && Math.abs(projected.z) <= 1;
+    if (!showMarker) {
+      // Outro (CSS .leaving: swell to 1.2, shrink to 0) before it is hidden; it stays where it was.
+      if (!marker.hidden && !markerLeftAt) { markerLeftAt = now; marker.classList.add('leaving'); }
+      if (markerLeftAt && now - markerLeftAt >= MARKER_OUTRO) { marker.hidden = true; marker.classList.remove('leaving'); markerLeftAt = 0; }
+    } else {
+      if (markerLeftAt) { marker.classList.remove('leaving'); markerLeftAt = 0; }
+      marker.hidden = false;
       marker.style.left = `${(projected.x * 0.5 + 0.5) * innerWidth}px`;
       marker.style.top = `${(-projected.y * 0.5 + 0.5) * innerHeight}px`;
       marker.querySelector('.marker-label').textContent = `MAP / ${nearby.data.title}`;

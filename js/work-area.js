@@ -24,6 +24,9 @@ export const WORK_AREA = {
   float: 0.55,       // gap under an active block (m)
   label: 1 / 290,    // label size: metres per canvas pixel (walking view)
   labelGrow: 12,     // beyond this camera distance (m) labels keep their on-screen size (minimap zoom)
+  labelMap: 2,       // extra label scale once the camera is far up (minimap)
+  labelGap: 0.08,    // between stacked labels (m, scaled like the labels)
+  revealSpeed: 1.5,  // label reveal tween speed (1 = Bruno's 1 s after a 0.3 s delay)
   pad: { half: 0.48, h: 0.12 }, // raised square pad (plinth) the block rests in (m)
   padding: 0.25,     // span padding before a lane counts as entered (Bruno: 0.25)
   socialR: 6,        // half circle of social links (Bruno: 6)
@@ -134,20 +137,22 @@ export async function createWorkArea({ scene, physics, points, x, zStart, career
     const { texture, w, h } = labelTexture(job);
     const reveal = { value: 0 };
     const label = new THREE.Mesh(labelGeo, new THREE.ShaderMaterial({
-      uniforms: { uMap: { value: texture }, uReveal: reveal, uColor: { value: bright }, uMask: { value: MASK }, uSize: { value: new THREE.Vector2(w * L.label, h * L.label) }, uLevel: { value: 0 }, uGrow: { value: L.labelGrow } },
-      // Screen-space layout (view space): up-left of the block, lifted by uLevel (stagger), and
-      // grown with the camera distance beyond uGrow so the minimap can read it at any zoom.
-      vertexShader: `uniform vec2 uSize; uniform float uLevel, uGrow; varying vec2 vUv;
+      uniforms: { uMap: { value: texture }, uReveal: reveal, uColor: { value: bright }, uMask: { value: MASK }, uSize: { value: new THREE.Vector2(w * L.label, h * L.label) }, uGrow: { value: L.labelGrow }, uMapScale: { value: L.labelMap }, uDrop: { value: 0 } },
+      // Screen-space layout (view space): just up-right of the block, grown with the camera
+      // distance beyond uGrow so the minimap can read it at any zoom, and uMapScale times larger
+      // once the camera is far up (minimap).
+      vertexShader: `uniform vec2 uSize; uniform float uGrow, uMapScale, uDrop; varying vec2 vUv;
         void main() {
           vUv = uv;
           vec4 mv = modelViewMatrix * vec4(0.0, 0.0, 0.0, 1.0);
           float k = clamp(-mv.z / uGrow, 1.0, 40.0); // constant on-screen size beyond uGrow
-          mv.xy += (vec2(0.3, 0.35 + uLevel) + position.xy * uSize) * k; // up-right: the counter is on the left
+          k *= mix(1.0, uMapScale, smoothstep(1.5, 2.8, k)); // full from ~34 m (lowest minimap zoom)
+          mv.xy += (vec2(0.3, 0.35 - uDrop) + position.xy * uSize) * k; // up-right: the counter is on the left; uDrop = stacking
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `uniform sampler2D uMap; uniform float uReveal; uniform vec3 uColor, uMask; varying vec2 vUv;
         void main() {
-          if (vUv.x > uReveal) discard;
+          if (vUv.x >= uReveal) discard; // >=: at uReveal 0 not even the left texel column shows
           vec4 t = texture2D(uMap, vUv);
           if (t.a < 0.1) discard;
           vec3 c = mix(uMask, uColor, t.r);
@@ -161,12 +166,8 @@ export async function createWorkArea({ scene, physics, points, x, zStart, career
     label.renderOrder = 2;
     block.add(label);
     block.position.y = restY;
-    return { label, h: h * L.label, origin, size, block, glow, dim, bright, reveal, tween: null, isIn: false, isUp: false };
+    return { label, drop: label.material.uniforms.uDrop, h: h * L.label, origin, size, block, glow, dim, bright, reveal, tween: null, isIn: false, isUp: false };
   });
-  // Stagger (screen space): three label levels, so the labels of neighbouring lanes (also up to two
-  // apart) never overlap, whatever the camera angle or zoom.
-  const levelStep = Math.max(...lines.map((l) => l.h)) + 0.15;
-  lines.forEach((line, i) => { line.label.material.uniforms.uLevel.value = (i % 3) * levelStep; });
 
   // ---------- Month counter MM/YY: seven-segment glyphs flat on the ground, west of the road (the labels sit up-right of the blocks, so they never cover it) ----------
   const counter = { group: new THREE.Group(), current: '', bars: [] };
@@ -232,10 +233,10 @@ export async function createWorkArea({ scene, physics, points, x, zStart, career
         const inside = delta > -L.padding && delta < line.size + L.padding * 2;
         if (inside !== line.isIn) {
           line.isIn = inside;
-          line.tween = { from: line.reveal.value, to: inside ? 1 : 0, t: inside ? -0.3 : 0 }; // 0.3 s delay in
+          line.tween = { from: line.reveal.value, to: inside ? 1 : 0, t: inside ? -0.3 : 0 }; // 0.3 s delay in (at speed 1)
         }
         if (line.tween) {
-          line.tween.t += dt;
+          line.tween.t += dt * L.revealSpeed;
           const k = THREE.MathUtils.clamp(line.tween.t, 0, 1);
           line.reveal.value = line.tween.from + (line.tween.to - line.tween.from) * power2InOut(k);
           if (k >= 1) line.tween = null;
@@ -250,6 +251,16 @@ export async function createWorkArea({ scene, physics, points, x, zStart, career
         else offset = delta > line.size ? -line.size : 0;
         line.block.position.z += (line.origin.z + offset - line.block.position.z) * Math.min(1, dt * 10);
         line.glow.color.lerp(line.isUp ? line.bright : line.dim, Math.min(1, dt * 4));
+      }
+      // Stacking: the blocks of jobs walked at once float side by side, so their labels would
+      // overlap. The newest job (latest start; lines are sorted by start) keeps its place, each
+      // older one slides down below the newer ones. Labels on their way out keep their place.
+      let drop = 0;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i];
+        if (!line.isIn) continue;
+        line.drop.value += (drop - line.drop.value) * Math.min(1, dt * 8);
+        drop += line.h + L.labelGap;
       }
       // Counter follows the player along the span and shows the month at its position.
       const delta = originZ - player.z;

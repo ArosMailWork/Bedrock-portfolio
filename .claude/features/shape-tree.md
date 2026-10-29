@@ -15,7 +15,13 @@ obfuscated; no code, textures or algorithms were copied. Everything is a re-impl
   reset button), MOVE (sliders built from `MOVE_CONTROLS` in garden.js, boost hint, reset button).
   Pixel SVG icons are inline. Whole HUD scaled by `--hud-zoom` 1.15 (CSS `zoom` on `.hud-panel`,
   `.dock`, `.controls`; the plot marker uses `transform: scale` because garden.js positions it by
-  screen left / top). Settings panel 300 px wide, tabs size to their label (no overflow).
+  screen left / top; marker scale = hud-zoom × 2, its diamond pops in with `hud-pop` on each show and, when hidden, plays `hud-out` (1 → 1.2 → 0, 0.25 s, class `leaving`, not clickable) before the render loop, sole owner of its visibility, sets `hidden`).
+  Settings panel 300 px wide, tabs size to their label (no overflow).
+  Top-left slot: heading and minimap panel (`#plot-info`) share it, both scale 1.167 (= old .667 ×
+  1.75). Driven by `body.map-view` (no `hidden` attribute): heading fades out moving up 12 px, the
+  minimap panel fades in from 12 px below (0.3 s, visibility switched after the fade-out). The
+  minimap panel carries its own TPS CAMERA button (`#map-return` → beginView(false)) since the
+  heading's view toggle is hidden in map view; Follow player / Smooth row has its own padded box.
   Loads `vendor/howler/howler.min.js` (classic script → `window.Howl`, `window.Howler`).
   Howler is only loaded; no sounds are wired (the owner handles audio).
 - `js/portfolio-data.js`: placeholder portfolio content (short lines → smaller plots).
@@ -83,9 +89,14 @@ placeholders for the owner's own models. No sounds (owner handles audio).
   billboard, laid out in view space: anchored bottom right, up-left of the block top, `label` 1/290 m
   per px) so it reads from any angle incl. the minimap. Beyond `labelGrow` 12 m camera distance it
   scales with the distance (constant on-screen size, ≤ 40×), so minimap labels stay readable at any
-  zoom. Stagger in screen space: level = lane index % 3, step = tallest label + 0.15 m (scaled too),
-  so labels of lanes up to two apart never overlap (the earlier world-y stagger did nothing from
-  above). Reveal left to right over 1 s after 0.3 s (power2.inOut), uv.x discard.
+  zoom. Once far up (k from 1.5 to 2.8, i.e. ~18–34 m) labels grow a further `labelMap` 2× (owner:
+  minimap text too small next to the counter). Labels sit right by their block (up-right offset
+  0.3 / 0.35, no fixed stagger). Dynamic stacking instead (uniform `uDrop`, view space, scaled with
+  the label): among the lanes the player is in, the newest job (latest start) keeps its place and
+  each older one eases down (8/s) by the heights of the newer ones + `labelGap` 0.08 m; labels on
+  their way out keep their drop. Reveal left to right over 1 s after 0.3 s (power2.inOut), played at
+  `revealSpeed` 1.5× (owner),
+  discard where uv.x >= reveal (>=, so a closed label leaves no 1-texel sliver at its left edge).
 - Month counter `MM/YY` (owner: short, month first): four seven-segment digits (Bruno's table) and a
   fixed slanted slash bar, flat on a dark plate right against the EAST curb (0.35 m gap; moved there so
   the up-left labels never cover it); follows the player along the span, shows start + floor(offset / monthM)
@@ -97,7 +108,16 @@ placeholders for the owner's own models. No sounds (owner handles audio).
 - Interactive points (shared, for projects / lab later): DOM labels projected each frame; shown
   within `POINTS.reveal` 7 m and on screen, nearest within `POINTS.active` 2.4 m is gold with an E
   key cap; E / Enter or a click triggers. Hidden in the map and during transitions. Labels are not
-  CSS-zoomed (zoom would scale the projected translate).
+  CSS-zoomed (zoom would scale the projected translate). Sized 2× (diamond 28 px, label 2.1rem, key
+  44 px). Intro each time a point shows (display none → shown restarts CSS animations): diamond pops
+  from its centre (`hud-pop`: scale 0 → 1.2 → 1, 0.35 s), nudges 8 px away from the label, then the
+  label unrolls outwards via clip-path (0.45 s delay, 0.4 s); the E key pops when the point turns
+  active, its animation-delay set in JS to the rest of `POINTS.intro` 0.85 s since it showed.
+  `align: 'left'` mirrors all of it (row-reverse, diamond at the point, label + key to its left).
+  Outro instead of an instant hide: class `leaving` scales the inner `.ipoint-body` (origin at the
+  diamond; the button's own transform is the projected position) 1 → 1.2 → 0 (`hud-out`,
+  `POINTS.outro` 0.25 s), then JS sets `hidden`; coming back mid-outro just drops the class. A
+  leaving point keeps its active highlight / key cap through the outro.
 - Verified (Chrome, test-only spawn patch): stones rise / slide / reveal, blocks park in their end pads,
   counter counts, link labels + E open the URL; no JS errors; tree tests pass.
 

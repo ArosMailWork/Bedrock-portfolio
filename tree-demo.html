@@ -25,7 +25,7 @@
     </button>
   </header>
 
-  <section id="plot-info" class="hud-panel px-corners" hidden>
+  <section id="plot-info" class="hud-panel px-corners">
     <p class="eyebrow">◆ Top view</p>
     <h2>MINIMAP</h2>
     <p class="hint">Drag to pan · Scroll to zoom · WASD to move · ESC to return</p>
@@ -33,6 +33,10 @@
       <label class="setting-toggle"><input id="map-follow" type="checkbox" /> <span>Follow player</span></label>
       <label class="map-follow-smooth"><span>Smooth</span><input id="map-follow-smooth" type="range" min="0" max="1" step="0.05" aria-label="Follow smoothness" /><output id="map-follow-value"></output></label>
     </div>
+    <button id="map-return" class="map-link" type="button" aria-label="Back to the garden view">
+      <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3h5v2h4v9H2V5h3z" fill="currentColor" opacity=".35"/><path d="M5 3h5v1H5zM2 5h12v1H2zM2 13h12v1H2zM2 6h1v7H2zM13 6h1v7h-1zM7 7h3v1H7zM6 8h1v3H6zM10 8h1v3h-1zM7 11h3v1H7z" fill="currentColor"/></svg>
+      <span class="view-label">TPS CAMERA</span>
+    </button>
   </section>
 
   <nav id="dock" class="hotbar dock" aria-label="Garden controls">
