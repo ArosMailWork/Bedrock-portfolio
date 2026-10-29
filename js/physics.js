@@ -2,7 +2,7 @@
 import * as RAPIER from '../vendor/rapier/rapier.mjs';
 
 export const CAPSULE = { halfHeight: 0.36, radius: 0.42 }; // centre sits 0.78 above the feet
-const GRAVITY = 22;      // game-feel gravity (m/s²), snappier than 9.81
+export const GRAVITY = 22; // game-feel gravity (m/s²), snappier than 9.81
 const JUMP_SPEED = 8;    // ≈ 1.45 m jump
 
 export async function createPhysics() {
@@ -17,7 +17,15 @@ export async function createPhysics() {
     cylinder: (x, y, z, halfHeight, radius) => add(RAPIER.ColliderDesc.cylinder(halfHeight, radius), x, y, z),
     ball: (x, y, z, radius) => add(RAPIER.ColliderDesc.ball(radius), x, y, z),
     trimesh: (vertices, indices) => world.createCollider(RAPIER.ColliderDesc.trimesh(vertices, indices), fixed),
-
+    // Dynamic body (carnival cans and balls). kind: 'ball' [r] | 'cylinder' [halfHeight, r].
+    // Returns the Rapier body (translation(), rotation(), setTranslation(), setRotation(),
+    // setLinvel(), setAngvel(), isSleeping()). ccd: continuous collision for fast throws.
+    dynamic(kind, dims, x, y, z, { density = 1, friction = 0.6, restitution = 0.2, ccd = false } = {}) {
+      const body = world.createRigidBody(RAPIER.RigidBodyDesc.dynamic().setTranslation(x, y, z).setCcdEnabled(ccd));
+      const desc = kind === 'ball' ? RAPIER.ColliderDesc.ball(dims[0]) : RAPIER.ColliderDesc.cylinder(dims[0], dims[1]);
+      world.createCollider(desc.setDensity(density).setFriction(friction).setRestitution(restitution), body);
+      return body;
+    },
     // Feet position in, feet position out. Slides along walls, steps over curbs, snaps to slopes, jumps.
     createCharacter(x, y, z) {
       const centre = CAPSULE.halfHeight + CAPSULE.radius;

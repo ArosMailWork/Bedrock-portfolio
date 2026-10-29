@@ -10,6 +10,9 @@ export const MAP2D = {
   fill: [3.2, 1.6],       // magnification: live look at >= 3.2, baked look at <= 1.6
   wheelStep: 0.0008,      // zoom per wheel delta unit: one 100-unit notch = ~8% (exp(-0.08))
   zoomEase: 10,           // per second: the view closes ~95% of the gap to the target in 0.3 s
+  // Minimap panel toggle: the view follows the player (drag still pans; it glides back on release).
+  // smooth 0 = locked on, 1 = very soft (follow rate 25 -> 1.2 per second).
+  follow: { on: false, smooth: 0.5 },
 };
 
 export function createMap2D({ canvas, extent }) {
@@ -76,7 +79,9 @@ export function createMap2D({ canvas, extent }) {
     event.preventDefault();
     flight = null;
     const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? innerHeight : 1);
-    const dx = event.clientX - innerWidth / 2, dy = event.clientY - innerHeight / 2;
+    // Following the player: zoom around the screen centre (the player), not the cursor.
+    const follow = MAP2D.follow.on;
+    const dx = follow ? 0 : event.clientX - innerWidth / 2, dy = follow ? 0 : event.clientY - innerHeight / 2;
     const ppm = Math.min(MAP2D.maxPpm, Math.max(minPpm(), (zoom ? zoom.ppm : view.ppm) * Math.exp(-delta * MAP2D.wheelStep)));
     zoom = { ppm, dx, dy, wx: view.x + dx / view.ppm, wz: view.z + dy / view.ppm };
   }, { passive: false });
@@ -84,7 +89,7 @@ export function createMap2D({ canvas, extent }) {
     const k = reducedMotion.matches ? 1 : 1 - Math.exp(-MAP2D.zoomEase * dt);
     const done = Math.abs(Math.log(zoom.ppm / view.ppm)) < 0.002;
     view.ppm = done ? zoom.ppm : Math.exp(Math.log(view.ppm) + (Math.log(zoom.ppm) - Math.log(view.ppm)) * k);
-    view.x = zoom.wx - zoom.dx / view.ppm; view.z = zoom.wz - zoom.dy / view.ppm;
+    if (!MAP2D.follow.on) { view.x = zoom.wx - zoom.dx / view.ppm; view.z = zoom.wz - zoom.dy / view.ppm; }
     clampView();
     if (done) zoom = null;
   }
@@ -124,6 +129,11 @@ export function createMap2D({ canvas, extent }) {
       playerAt = { x: player.x, z: player.z };
       const now = performance.now() / 1000, dt = Math.min(now - lastFrame, 0.05); lastFrame = now;
       if (zoom) stepZoom(dt);
+      if (MAP2D.follow.on && !drag && !flight) {
+        const k = reducedMotion.matches ? 1 : 1 - Math.exp(-(25 + (1.2 - 25) * MAP2D.follow.smooth) * dt);
+        view.x += (player.x - view.x) * k; view.z += (player.z - view.z) * k;
+        clampView();
+      }
       if (flight) flight(); else apply();
     },
   };

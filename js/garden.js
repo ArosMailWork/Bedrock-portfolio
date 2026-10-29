@@ -2,9 +2,13 @@ import * as THREE from 'three';
 import { maskFromPixelFont, maskFromBody } from './shape-mask.js';
 import { planForest } from './shape-tree.js';
 import { buildTreeScene, wind, treeSettings, fillerFade, barkFade, seeThrough, mapFill, mapCenter, SUN_OFFSET } from './tree-mesh.js';
-import { PLOTS } from './portfolio-data.js';
+import { PLOTS, CAREER, SOCIAL, PROJECTS, LAB, CARNIVAL } from './portfolio-data.js';
 import { buildGround, buildWater, shoreRadius, WALK_LIMIT } from './island.js';
 import { buildPark } from './park.js';
+import { createWorkArea } from './work-area.js';
+import { createShowcase, SHOWCASE, PATH_W } from './showcase.js';
+import { createCarnival } from './carnival.js';
+import { createInteractivePoints } from './interactive-points.js';
 import { createPhysics } from './physics.js';
 import { createPost, POST_DEFAULTS, POST_SETTINGS, POST_CONTROLS } from './post.js';
 import { createLeafFall } from './leaf-fall.js';
@@ -12,7 +16,7 @@ import { updateWind } from './wind.js';
 import { createWindLines } from './wind-lines.js';
 import { createSky, SKY } from './sky.js';
 import { bakeMap } from './map-bake.js';
-import { createMap2D } from './map2d.js';
+import { createMap2D, MAP2D } from './map2d.js';
 
 // ---------- Renderer, light and atmosphere ----------
 const renderer = new THREE.WebGLRenderer({ antialias: false }); // MSAA happens in the post target
@@ -52,11 +56,37 @@ const settingsToggle = document.querySelector('#settings-toggle');
 const settingsPanel = document.querySelector('#settings');
 const growRange = document.querySelector('#grow-range');
 const growRangeValue = document.querySelector('#grow-range-value');
-let park = null, leafFall = null, map2d = null;
+let park = null, leafFall = null, map2d = null, workArea = null, carnival = null;
+const points = createInteractivePoints();
 const status = document.querySelector('#status');
 const keys = new Set(), plots = [];
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 let mode = 'walk', nearby = null, transition = null, islandR = 60; // mode: walk | entering | map | leaving-2d | leaving
+// Focus (walk mode only): an area (showcase board, carnival booth) takes the camera to a fixed
+// pose; walking and looking are off, Esc releases it. `stage` is the API handed to the areas.
+let focus = null; // { eye, look, onExit }
+const focusHud = document.createElement('div');
+focusHud.id = 'focus-hud'; focusHud.className = 'hud-panel'; focusHud.hidden = true;
+document.body.append(focusHud);
+const stage = {
+  camera, dom: renderer.domElement,
+  get active() { return Boolean(focus); },
+  focus(eye, look, onExit) {
+    if (focus || mode !== 'walk' || transition) return false;
+    focus = { eye: eye.clone(), look: look.clone(), onExit };
+    keys.clear(); boost.on = false; dragging = false;
+    viewToggle.disabled = true; marker.hidden = true;
+    return true;
+  },
+  release() {
+    if (!focus) return;
+    const { onExit } = focus;
+    focus = null; focusHud.hidden = true; viewToggle.disabled = false;
+    onExit?.();
+  },
+  // HUD panel (bottom centre) while focused: html string, or null to hide.
+  hud(html) { focusHud.hidden = html == null; if (html != null) focusHud.innerHTML = html; },
+};
 const target = new THREE.Vector3(), projected = new THREE.Vector3(), desired = new THREE.Vector3();
 let cameraFloor = 0; // camera follows height slowly, so jumps read on screen
 let armScale = 1;    // 0..1 share of the shoulder arm left after camera collision (smoothed)
@@ -168,7 +198,7 @@ function shoulderPoseUnclipped() {
 // Walking: drag to look around. The map mode has its own pan / zoom (map2d.js).
 let dragging = false;
 renderer.domElement.addEventListener('pointerdown', (event) => {
-  if (mode !== 'walk' || event.button !== 0) return;
+  if (mode !== 'walk' || focus || event.button !== 0) return;
   dragging = true; renderer.domElement.setPointerCapture(event.pointerId);
 });
 renderer.domElement.addEventListener('pointermove', (event) => {
@@ -289,11 +319,42 @@ for (const tab of settingsTabs) {
   };
 }
 syncPostPanel();
+// Settings > GARDEN > Export: the current scene as .glb or .fbx (scene-export.js, loaded on demand).
+const exportStatus = document.querySelector('#export-status');
+for (const [id, kind] of [['#export-glb', 'glb'], ['#export-fbx', 'fbx']]) {
+  document.querySelector(id).onclick = async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true; exportStatus.textContent = `Exporting ${kind.toUpperCase()}…`;
+    try {
+      const { exportGLB, exportFBX } = await import('./scene-export.js');
+      const meshes = kind === 'glb' ? await exportGLB(scene) : exportFBX(scene);
+      exportStatus.textContent = `Exported ${meshes} meshes as portfolio-garden.${kind}.`;
+    } catch (error) {
+      console.error(error);
+      exportStatus.textContent = `Export failed: ${error.message}`;
+    }
+    button.disabled = false;
+  };
+}
+// Minimap panel: follow-player toggle + smoothness slider (MAP2D.follow).
+const mapFollow = document.querySelector('#map-follow'), mapFollowSmooth = document.querySelector('#map-follow-smooth');
+const mapFollowValue = document.querySelector('#map-follow-value');
+function syncMapFollow() {
+  mapFollow.checked = MAP2D.follow.on;
+  mapFollowSmooth.value = MAP2D.follow.smooth;
+  mapFollowSmooth.disabled = !MAP2D.follow.on;
+  mapFollowValue.textContent = Number(MAP2D.follow.smooth).toFixed(2);
+}
+mapFollow.onchange = () => { MAP2D.follow.on = mapFollow.checked; syncMapFollow(); };
+mapFollowSmooth.oninput = () => { MAP2D.follow.smooth = Number(mapFollowSmooth.value); syncMapFollow(); };
+syncMapFollow();
 addEventListener('keydown', (event) => {
   if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Space', 'ShiftLeft', 'ShiftRight'].includes(event.code)) {
     event.preventDefault();
     if (event.code === 'Space') { if (!event.repeat && (mode === 'walk' || mode === 'map')) jumpQueued = true; }
+    else if (event.code === 'Escape' && focus) stage.release();
     else if (event.code === 'Escape' && mode === 'map') beginView(false);
+    else if (focus) return;
     else if (mode === 'walk' || mode === 'map') {
       keys.add(event.code);
       // Boost: the second Shift press within MOVE.doubleTap seconds of the first.
@@ -352,23 +413,23 @@ async function init() {
   const [physics, masks] = await Promise.all([createPhysics(), Promise.all(PLOTS.map(plotMask))]);
 
   // ---------- Plots: four quadrants around the plaza, slightly offset ----------
-  const GAP_X = 16, GAP_Z = 14, JITTER = [[-1.5, 1], [2, -1.2], [1, 1.8], [-2, -0.8]];
+  // The gaps leave room for the ring road around the plaza and the cross axes between the plots.
+  const GAP_X = 28, GAP_Z = 28, JITTER = [[-1.5, 1], [2, -1.2], [1, 1.8], [-2, -0.8]];
   // Island radius: smallest R keeping every tile (and lodge) on the lawn in ITS direction.
   let needR = 0;
   const reach = (px, pz, pad) => { needR = Math.max(needR, (Math.hypot(px, pz) + pad) / (0.86 * shoreRadius(Math.atan2(pz, px), 1))); };
   PLOTS.forEach((data, i) => {
     // Trees are only planned here; their branches and leaves are built when the player comes near.
     const forest = planForest(masks[i], { seed: i * 17 + 3 });
-    const view = buildTreeScene(forest, masks[i], { colors: data.colors, bodyColors: data.bodyColors || data.colors.map(darker), seed: i * 1.7 });
-    const { w, h } = view.size, sx = i % 2 ? 1 : -1, sz = i < 2 ? -1 : 1;
+    const sx = i % 2 ? 1 : -1, sz = i < 2 ? -1 : 1;
+    // The walkway spur leaves from the corner facing the plaza (-sx, -sz).
+    const view = buildTreeScene(forest, masks[i], { colors: data.colors, bodyColors: data.bodyColors || data.colors.map(darker), seed: i * 1.7, toward: [-sx, -sz], rootChips: data.title === 'ABOUT' });
+    const { w, h } = view.size;
     const x = sx * (w / 2 + GAP_X / 2) + JITTER[i][0], z = sz * (h / 2 + GAP_Z / 2) + JITTER[i][1];
     view.group.position.set(x, 0, z);
     scene.add(view.group);
-    // Entrance: walk from the plot centre towards the plaza until the tiles end.
-    const dir = new THREE.Vector3(-x, 0, -z).normalize();
-    let t = 0;
-    while (view.isFloor(dir.x * t, dir.z * t) && t < 3000) t += 0.5;
-    const entrance = new THREE.Vector3(x + dir.x * (t + 1.8), 0, z + dir.z * (t + 1.8));
+    // Entrance: where the walkway spur leaves the tiles; the main park path ends here.
+    const entrance = new THREE.Vector3(x + view.entry.x, 0, z + view.entry.z);
     for (const root of forest.roots) physics.cylinder(x + root.x, 1.6, z + root.z, 1.6, root.radius * 0.9);
     for (const cell of view.floor) reach(x + cell.x, z + cell.z, 2);
     plots.push({ data, forest, view, x, z, w, h, entrance, flat: -1 });
@@ -376,6 +437,26 @@ async function init() {
   const maxW = Math.max(...plots.map((p) => p.w));
   const houses = [-1, 1].map((side) => ({ x: side * (GAP_X / 2 + maxW / 2), z: 0, angle: -side * Math.PI / 2 }));
   for (const h of houses) reach(h.x, h.z, 6);
+  // WORK quadrant: the career road leaves the WORK title plot northwards and ends in the social
+  // circle (work-area.js). Built before the island size is fixed, so it stays on the lawn.
+  const workPlot = plots.find((p) => p.data.title === 'WORK');
+  const roadStart = workPlot.z - workPlot.h / 2 + 1, boardZ = [roadStart - 9, roadStart - 24]; // Projects, Lab
+  workArea = await createWorkArea({ scene, physics, points, x: workPlot.x, zStart: roadStart, career: CAREER, social: SOCIAL, exits: boardZ.map((z) => ({ z, half: PATH_W / 2 })) });
+  // Projects and Lab boards on patios east of the career road (past the month counter), joined to
+  // the road by short paths.
+  const road = workArea.road, curb = road.x + road.halfW + 0.2;
+  const east = new THREE.Vector3(-1, 0, 0); // boards face the road (west)
+  const patioX = curb + 3 + SHOWCASE.patioR;
+  const showcases = [
+    createShowcase({ scene, physics, points, stage, kind: 'projects', title: 'PROJECTS', items: PROJECTS, x: patioX, z: boardZ[0], facing: east, entryX: curb }),
+    createShowcase({ scene, physics, points, stage, kind: 'lab', title: 'LAB', items: LAB, x: patioX, z: boardZ[1], facing: east, entryX: curb }),
+  ];
+  // SKILLS quadrant: a fair of booths on the lawn south of the SKILLS title plot, in an arc.
+  const skillsPlot = plots.find((p) => p.data.title === 'SKILLS');
+  carnival = await createCarnival({ scene, physics, points, stage, booths: CARNIVAL, x0: skillsPlot.x, z0: skillsPlot.z + skillsPlot.h / 2 - 9 }); // arc centre: booths stand ~17 m south of the plot
+  const areas = [workArea, ...showcases, carnival];
+  for (const area of areas) for (const b of area.bounds) reach(b.x, b.z, b.r);
+  const keepClear = (px, pz) => areas.some((area) => area.covers(px, pz));
   islandR = needR;
   // Transitions may look down from a few hundred metres; the far plane follows the island size.
   camera.far = Math.max(900, islandR * 3);
@@ -393,7 +474,7 @@ async function init() {
     const x0 = Math.cos(a0) * r0, z0 = Math.sin(a0) * r0, x1 = Math.cos(a1) * r1, z1 = Math.sin(a1) * r1;
     physics.box((x0 + x1) / 2, 1.5, (z0 + z1) / 2, Math.hypot(x1 - x0, z1 - z0) / 2 + 0.3, 2, 0.3, Math.atan2(-(z1 - z0), x1 - x0));
   }
-  park = buildPark({ scene, physics, R: islandR, plots, houses, time: wind });
+  park = buildPark({ scene, physics, R: islandR, plots, houses, time: wind, keepClear });
   leafFall = createLeafFall(scene, plots);
   for (const p of plots) { // entrance sign posts
     const post = new THREE.Mesh(new THREE.BoxGeometry(0.25, 1.4, 0.25), new THREE.MeshLambertMaterial({ color: 0x6b4f37 }));
@@ -447,7 +528,7 @@ async function init() {
     // Keys set a target velocity; the real velocity follows it (momentum). Shift runs; boost (double-
     // tapped Shift, held) keeps raising the target speed while moving.
     let wantX = 0, wantZ = 0, x = 0, z = 0;
-    if (!transition && (mode === 'walk' || mode === 'map')) {
+    if (!transition && !focus && (mode === 'walk' || mode === 'map')) {
       x = Number(keys.has('KeyD') || keys.has('ArrowRight')) - Number(keys.has('KeyA') || keys.has('ArrowLeft'));
       z = Number(keys.has('KeyW') || keys.has('ArrowUp')) - Number(keys.has('KeyS') || keys.has('ArrowDown'));
       const length = Math.hypot(x, z) || 1;
@@ -552,6 +633,9 @@ async function init() {
         viewToggle.disabled = false;
         setViewLabel();
       }
+    } else if (mode === 'walk' && focus) {
+      const k = reducedMotion ? 1 : 1 - Math.exp(-5 * dt);
+      target.lerp(focus.look, k); camera.position.lerp(focus.eye, k); camera.lookAt(target);
     } else if (mode === 'walk') {
       updateArm(dt);
       pose = shoulderPose();
@@ -567,9 +651,9 @@ async function init() {
     fillerFade.value = 1 - THREE.MathUtils.smoothstep(-projected.y, 0.45, 0.8);
     barkFade.value = mode === 'walk' ? 1 : fillerFade.value;
     // Leaves between the camera and the character are dropped (character always visible).
-    seeThrough.value = mode === 'walk' && !transition ? camera.position.distanceTo(player.position) : 0;
+    seeThrough.value = mode === 'walk' && !transition && !focus ? camera.position.distanceTo(player.position) : 0;
 
-    nearby = mode === 'walk' ? plots.find((plot) => plot.entrance.distanceTo(player.position) < 6) || null : null;
+    nearby = mode === 'walk' && !focus ? plots.find((plot) => plot.entrance.distanceTo(player.position) < 6) || null : null;
     marker.hidden = !nearby;
     if (nearby) {
       projected.copy(nearby.entrance); projected.y = 2.4; projected.project(camera);
@@ -611,6 +695,9 @@ async function init() {
       plot.view.tick(dt, mode === 'map' ? target : player.position, false, reducedMotion, camera);
     }
     park.setPlayer(player.position);
+    workArea.update(dt, player.position);
+    carnival.update(dt);
+    points.update(player.position, camera, mode === 'walk' && !transition && !focus);
     updateWind(dt);
     leafFall.update(dt, player.position, flat < 0.3, velocity);
     windLines.update(dt, player.position, mode === 'walk' && !transition);

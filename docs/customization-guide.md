@@ -187,10 +187,60 @@ and the object disappears.
 0–0.3, leaves sink (`uSink`) over 0.05–0.8 and fade over 0.65–0.8, voxels pop up in a wave over 0.1–1.
 See section 11 for the flight and the 2D map.
 
+## 6b. Career road and social circle (WORK quadrant)
+
+- Content: `CAREER` and `SOCIAL` in `js/portfolio-data.js` (jobs with 'YYYY-MM' start / end, title + extra lines, colour
+  blue | orange | purple | green; `end: null` = current job; social links with name, url, label side).
+- Feel: `WORK_AREA` in `js/work-area.js` (metres per year, lane gap, block size, float height, label size and minimap growth,
+  pad size, social radius). Minimap "Follow player" toggle + smoothness: `MAP2D.follow` in `js/map2d.js`
+  (default off / 0.5; also in the minimap panel). Interaction distances: `POINTS` in `js/interactive-points.js`.
+- Models: every shape in `createWorkArea` is a placeholder (floating block, statue); swap the
+  meshes, keep the groups (each job's `block` group moves; the label is a child of it).
+
+## 6c. Projects, Lab and carnival
+
+- Content: `PROJECTS`, `LAB` (title, year, tags, url, text, images: URLs) and `CARNIVAL` (game: cans |
+  ducks | rings | moles, one booth each) in `js/portfolio-data.js`.
+- Boards: `SHOWCASE` in `js/showcase.js` (patio size, board size, camera distance, texture size);
+  positions in `init()` of `js/garden.js` (`createShowcase` calls).
+- Carnival: `CARNIVAL_AREA` in `js/carnival.js` (distance of the booths from the fair centre, booth size, camera, and per-game rules:
+  balls, time limits, goals, speeds, ring catch radius). Placement: `createCarnival` call in garden.js.
+- New interactive areas can use the same camera focus: `stage.focus(eye, look, onExit)`,
+  `stage.hud(html)`, `stage.release()`.
+
+## 6d. WORK tiles, ABOUT roots
+
+- WORK walkways: smooth curbs from `curbRing` / `curbStrip` (work-area.js, `CURB` size, gaps = openings);
+  paver textures in `js/pavers.js` (`GRID_M`, `RING_W`, `BRICK_L`, colours from `PALETTE.tile`).
+- Plot walkways: layout `WALK` in tree-mesh.js, drawn in park.js (orange `PALETTE.tileWalk`, height
+  `WALK_Y`); furniture spacing in the "Plot walkways: every ~9 m" loop.
+- Export: Settings > GARDEN > EXPORT GLB / FBX (`js/scene-export.js`). Hide something from the export
+  with `object.userData.skipExport = true`. GLB is the small, reliable one (open in Blender, then
+  File > Export > FBX if needed); FBX is written directly but large.
+- ABOUT trees break the tiles round their trunks on foot (whole tiles in the minimap): `rootChips` option,
+  ring size `ROOT_CHIPS` in tree-mesh.js.
+- Career labels side and the counter: label offset in the label vertex shader, counter position in
+  `createWorkArea`.
+- Fair: `CARNIVAL_AREA.arc` (arc radius) and `spacing` in carnival.js; arc centre in the `createCarnival` call.
+
 ## 7. Park, grass and props
 
 `buildPark()` in `js/park.js` builds paths, benches, lodges, lamps, bushes, flowers and grass
 procedurally; `PARK_COLORS` holds their colours. Each solid prop needs a mesh and a physics collider.
+Natural dressing (Townscaper-inspired):
+- Path network: `RING_R` (ring road radius round the plaza), `LOOKOUT_R` (round stops at the ends of
+  the N/S axes); the routes are listed under "Paths" in `buildPark` (ring, E/W lodge axes, N/S lookout
+  axes, one spur per plot). Plot spacing: `GAP_X` / `GAP_Z` in `garden.js`.
+- Plot walkways (side paths on the tiles): `WALK` in `tree-mesh.js` (ring band from the text box,
+  minimum line gap for a rung, spur width); brick colours `PALETTE.tileWalk`.
+- Stepping-stone shortcuts: `STONES` (spacing, slab size, zig-zag), from each spur to the axes beside it.
+- Clustered scatter: `SCATTER` (cluster spacing, max clusters, fade distance from the plots) and the
+  `KINDS` weights (bushes, meadow, ferns, rocks, dead wood) inside `buildPark`.
+- Context rules (`buildPark`, "Context rules"): flowers / pebbles / ferns where lawn meets tiles,
+  ferns + mushrooms under edge trees, a lamp at each trail mouth, a bench at the outer side of each
+  lodge-path bend, bushes at lodge back corners, reeds along the shore.
+- New props (`prop.fern`, `mushroom`, `rock`, `wildflowers`, `reeds`, `stump`, `log`) are low-poly
+  shapes built in code, one instanced batch each.
 Grass is sampled on a 0.32 m grid (density rejection `0.08 + 0.85 * dense`); clear an area by adding
 e.g. `if (Math.hypot(px - 10, pz - 8) < 3) continue;` before `blades.push()`. No grass-painting editor exists.
 Falling leaves: see section 8 (wind).

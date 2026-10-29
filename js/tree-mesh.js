@@ -8,6 +8,7 @@ export const PALETTE = {
   leaf: [0x86a96b, 0xa8bd7c, 0x708f59, 0xb8ca8b],
   tile: [0xf2ede2, 0xebe5d8, 0xe4ddcf],     // plain stone
   tileInk: [0xdcd3c2, 0xd5cbb9, 0xcec4b1],  // text cells: faintly darker, readable in 3D
+  tileWalk: [0xe8b98a, 0xe0ab7a, 0xefc69b], // plot walkways (park.js paths): orange paving
 };
 // Foliage sprite: a distance field of a clump of small diamond leaves (red channel = distance to
 // the nearest leaf edge). From bruno-simon.com (github.com/brunosimon/folio-2025, MIT, see
@@ -40,8 +41,12 @@ export const mapCenter = { value: new THREE.Vector3() };
 export const VOXEL = { height: 1.2, spread: 60 };
 
 const MARGIN = 6;        // stone border around the text, in cells
+const ROOT_CHIPS = 0.9;  // rootChips: broken-tile ring round a trunk, beyond its radius (m)
 const PAVED = 4;         // cells around the text that are always paved
 const SOLID = 3;         // cells around the text that never erode (tilt / chip / lawn)
+// Plot walkways (cells): ring = distance band from the text's bounding box, gap = minimum empty
+// rows between lines for a rung, spur = width of the entry strip towards the plaza.
+export const WALK = { ring: [2, 4], gap: 3, spur: 3.2 };
 const SIDES = 8;         // low-poly branch cross-section (smooth radial normals hide the facets)
 const hash = (x, z) => { const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return s - Math.floor(s); };
 const pick = (list, r) => list[Math.floor(r * list.length) % list.length];
@@ -150,7 +155,27 @@ function branchGeometry(tree, cluster, root) {
 // shrunk away. Floor tiles and voxels are split into CHUNK x CHUNK cell meshes, so off-screen parts
 // are frustum-culled. The floor is an organic low-poly patch around the text.
 const CHUNK = 32;
-export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors = colors, seed = 0 } = {}) {
+const WORN = new THREE.Color(0xb9b49a); // weathered, mossy stone at the border
+const KEEP = [0, 0.4, 0.7, 0.88, 0.97]; // tile survival by distance (cells) to the lawn
+// Stone tile material shared by the plots and the tile fields: in the far map (mapFill) tiles
+// close their gaps and their colours flatten towards the plain tile colour.
+function makeTileMaterial() {
+  const material = new THREE.MeshLambertMaterial();
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uFill = mapFill;
+    shader.uniforms.uFlat = { value: new THREE.Color(PALETTE.tile[0]) };
+    shader.vertexShader = 'uniform float uFill;\n' + shader.vertexShader
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.xz *= mix(1.0, 1.0 / 0.98, uFill);');
+    shader.fragmentShader = 'uniform float uFill;\nuniform vec3 uFlat;\n' + shader.fragmentShader
+      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, uFlat, uFill * 0.6);');
+  };
+  return material;
+}
+
+
+// toward: [sx, sz] signs of the plot corner facing the plaza (walkway spur direction), or null.
+// rootChips: tiles round each tree trunk break into chips, so the trees look rooted in the soil.
+export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors = colors, seed = 0, toward = null, rootChips = false } = {}) {
   const byLightness = (list) => [...list].sort((a, b) => new THREE.Color(a).getHSL({}).l - new THREE.Color(b).getHSL({}).l);
   const tonesByKind = [byLightness(colors), byLightness(bodyColors)];
   // Darkest palette colour gives the most contrast against the pale tiles.
@@ -312,6 +337,60 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
     const wobble = 1 + 0.1 * Math.sin(a * 5 + seed) + 0.05 * Math.sin(a * 11 + seed * 2);
     if (paved[r * cols + c] || (nx ** 4 + nz ** 4) * wobble <= 1) inside[r * cols + c] = 1;
   }
+  // 1b. Walkways (the plot's side paths): a ring with rounded corners around the text block,
+  //     rungs along the wider gaps between lines, and a wide spur from the ring corner facing the
+  //     plaza (`toward`) out through the patch edge, where the main park path arrives (`entry`).
+  //     The cells are only protected from erosion here; park.js draws the walkways as smooth
+  //     curbed paths (main path style, orange paving) from `walkways` (plot-local layout).
+  const walk = new Uint8Array(cols * rows);
+  let minC = Infinity, maxC = -Infinity, minR = Infinity, maxR = -Infinity;
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    if (inkAt(c, r)) { minC = Math.min(minC, c); maxC = Math.max(maxC, c); minR = Math.min(minR, r); maxR = Math.max(maxR, r); }
+  }
+  const mark = (c, r) => { if (c >= 0 && r >= 0 && c < cols && r < rows && !inkAt(c, r)) walk[r * cols + c] = 1; };
+  let entry = null, spurFrom = null;
+  const toLocal = (c, r) => ({ x: c - (cols - 1) / 2, z: r - (rows - 1) / 2 });
+  const rungs = [];
+  if (toward && minC <= maxC) {
+    const dx = toward[0] / Math.SQRT2, dz = toward[1] / Math.SQRT2, mid = (WALK.ring[0] + WALK.ring[1]) / 2;
+    const c0 = (toward[0] < 0 ? minC : maxC) + dx * mid, r0 = (toward[1] < 0 ? minR : maxR) + dz * mid;
+    spurFrom = toLocal(c0, r0);
+    for (let t = 0; t < cols + rows; t += 0.5) {
+      const pc = c0 + dx * t, pr = r0 + dz * t, rc = Math.round(pc), rr = Math.round(pr);
+      if (t > 1 && !(rc >= 0 && rr >= 0 && rc < cols && rr < rows && inside[rr * cols + rc])) {
+        entry = { x: pc + dx * 1.8 - (cols - 1) / 2, z: pr + dz * 1.8 - (rows - 1) / 2 };
+        break;
+      }
+      for (let i = -2; i <= 2; i++) for (let j = -2; j <= 2; j++) if (Math.hypot(rc + i - pc, rr + j - pr) <= WALK.spur / 2) mark(rc + i, rr + j);
+    }
+  }
+  if (minC <= maxC) {
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      const d = Math.hypot(Math.max(minC - c, 0, c - maxC), Math.max(minR - r, 0, r - maxR));
+      if (d >= WALK.ring[0] && d < WALK.ring[1]) mark(c, r);
+      if (d < WALK.ring[1]) inside[r * cols + c] = 1; // the floor fills the whole walkway frame
+    }
+    let run = 0;
+    for (let r = minR; r <= maxR + 1; r++) {
+      let empty = r <= maxR;
+      for (let c = minC; c <= maxC && empty; c++) if (inkAt(c, r)) empty = false;
+      if (empty) { run++; continue; }
+      if (run >= WALK.gap) {
+        const width = run >= 4 ? 2 : 1, top = r - run + Math.floor((run - width) / 2);
+        for (let rr = top; rr < top + width; rr++) for (let c = minC - WALK.ring[0]; c <= maxC + WALK.ring[0]; c++) mark(c, rr);
+        rungs.push({ z: toLocal(0, top + (width - 1) / 2).z, half: width / 2 + 0.25 });
+      }
+      run = 0;
+    }
+  }
+  for (let i = 0; i < walk.length; i++) if (walk[i]) inside[i] = 1;
+  // Walkway layout for park.js (plot-local metres): ring = centre line round the text box at
+  // `offset`, rungs = horizontal paths across it, spur = from the ring corner to the entry.
+  const walkways = minC <= maxC ? {
+    box: { x0: toLocal(minC, 0).x, x1: toLocal(maxC, 0).x, z0: toLocal(0, minR).z, z1: toLocal(0, maxR).z },
+    offset: (WALK.ring[0] + WALK.ring[1]) / 2 - 0.5, ringHalf: (WALK.ring[1] - WALK.ring[0]) / 2 + 0.1,
+    rungs, spur: entry && spurFrom ? { from: spurFrom, to: entry, half: WALK.spur / 2 } : null,
+  } : null;
   // 2. Distance (in cells, max 4) from each inside cell to the lawn.
   const edge = new Uint8Array(cols * rows).fill(9);
   const isIn = (c, r) => c >= 0 && r >= 0 && c < cols && r < rows && inside[r * cols + c];
@@ -323,19 +402,34 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
   }
   // 3. Erode the border into the lawn: tiles thin out, tilt, shrink and sink; some break into
   //    chips. Text cells (and their direct neighbours) are never touched.
-  const KEEP = [0, 0.4, 0.7, 0.88, 0.97];
   const floorCells = [], chips = [], voxelCells = [], floorKeys = new Set();
+  const rooted = new Uint8Array(cols * rows), rootChipCells = [], rootTileCells = [];
+  if (rootChips) for (const root of forest.roots) {
+    const reach = root.radius + ROOT_CHIPS, c0 = Math.round(root.x + (cols - 1) / 2), r0 = Math.round(root.z + (rows - 1) / 2);
+    for (let r = r0 - 3; r <= r0 + 3; r++) for (let c = c0 - 3; c <= c0 + 3; c++) {
+      if (c >= 0 && r >= 0 && c < cols && r < rows && Math.hypot(c - (cols - 1) / 2 - root.x, r - (rows - 1) / 2 - root.z) < reach) rooted[r * cols + c] = 1;
+    }
+  }
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     if (!inside[r * cols + c]) continue;
     const x = c - (cols - 1) / 2, z = r - (rows - 1) / 2, rnd = hash(x + seed, z), rnd2 = hash(z - seed, x * 1.3);
     const ink = inkAt(c, r), e = edge[r * cols + c];
-    const protectedCell = solid[r * cols + c] === 1;
+    const onWalk = walk[r * cols + c] === 1;
+    const protectedCell = solid[r * cols + c] === 1 || onWalk;
     const wear = protectedCell || e > 4 ? 0 : 1 - KEEP[e];
+    if (rooted[r * cols + c] && !onWalk) {
+      // Round a trunk: broken tiles on soil on foot (lawn shows, grass grows); in the minimap the
+      // cell shows a whole tile (rootTiles), so the text reads cleanly. The text voxel stays.
+      if (rnd < 0.7) rootChipCells.push({ x: x + (rnd - 0.5) * 0.5, z: z + (rnd2 - 0.5) * 0.5, rnd, size: 0.3 + rnd2 * 0.35, chip: true });
+      rootTileCells.push({ x, z, ink, rnd, wear: 0, chip: false });
+      if (ink) voxelCells.push({ x, z, kind: kindAt(c, r) });
+      continue;
+    }
     if (rnd2 < wear) {
       if (rnd < 0.55) chips.push({ x: x + (rnd - 0.5) * 0.5, z: z + (rnd2 - 0.5) * 0.5, rnd, size: 0.25 + rnd * 0.3 });
       continue; // lawn shows through; grass grows here
     }
-    floorCells.push({ x, z, ink, rnd, wear });
+    floorCells.push({ x, z, ink, rnd, wear, walk: onWalk });
     floorKeys.add(`${x},${z}`);
     if (ink) voxelCells.push({ x, z, kind: kindAt(c, r) });
   }
@@ -350,43 +444,43 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
     return [...byKey.values()].map((list) => { const mesh = makeMesh(list); mesh.computeBoundingSphere(); group.add(mesh); return mesh; });
   };
   const tileGeo = keep(new THREE.BoxGeometry(0.98, 0.1, 0.98));
-  const tileMaterial = keep(new THREE.MeshLambertMaterial());
-  tileMaterial.onBeforeCompile = (shader) => {
-    shader.uniforms.uFill = mapFill;
-    shader.uniforms.uFlat = { value: new THREE.Color(PALETTE.tile[0]) };
-    shader.vertexShader = 'uniform float uFill;\n' + shader.vertexShader
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.xz *= mix(1.0, 1.0 / 0.98, uFill);');
-    shader.fragmentShader = 'uniform float uFill;\nuniform vec3 uFlat;\n' + shader.fragmentShader
-      .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, uFlat, uFill * 0.6);');
-  };
-  const worn = new THREE.Color(0xb9b49a); // weathered, mossy stone at the border
-  const tileMeshes = chunked([...floorCells.map((cell) => ({ ...cell, chip: false })), ...chips.map((chip) => ({ ...chip, chip: true }))], (list) => {
+  const tileMaterial = keep(makeTileMaterial());
+
+  const tileMesh = (list) => {
     const tiles = new THREE.InstancedMesh(tileGeo, tileMaterial, list.length);
     list.forEach((cell, i) => {
       if (cell.chip) {
         rotation.setFromEuler(new THREE.Euler(0, cell.rnd * 6.28, 0));
         tiles.setMatrixAt(i, matrix.compose(position.set(cell.x, -0.01, cell.z), rotation, scale.set(cell.size, 0.8, cell.size * 0.8)));
-        tiles.setColorAt(i, color.setHex(pick(PALETTE.tile, cell.rnd)).lerp(worn, 0.4));
+        tiles.setColorAt(i, color.setHex(pick(PALETTE.tile, cell.rnd)).lerp(WORN, 0.4));
         return;
       }
       const w = cell.wear;
       rotation.setFromEuler(new THREE.Euler((cell.rnd - 0.5) * 0.12 * w, (cell.rnd - 0.5) * 0.5 * w, 0));
       tiles.setMatrixAt(i, matrix.compose(position.set(cell.x, 0.01 + cell.rnd * 0.025 - w * 0.03, cell.z), rotation, scale.set(1 - w * 0.25, 1, 1 - w * 0.2)));
-      tiles.setColorAt(i, color.setHex(pick(cell.ink ? PALETTE.tileInk : PALETTE.tile, cell.rnd)).lerp(worn, w * 0.5));
+      tiles.setColorAt(i, color.setHex(pick(cell.ink ? PALETTE.tileInk : PALETTE.tile, cell.rnd)).lerp(WORN, w * 0.5));
     });
     tiles.receiveShadow = true;
     return tiles;
-  });
+  };
+  const tileMeshes = chunked([...floorCells.map((cell) => ({ ...cell, chip: false })), ...chips.map((chip) => ({ ...chip, chip: true }))], tileMesh);
+  // Root rings: chips on foot, whole tiles in the minimap (swapped in setFlat).
+  const rootChipMeshes = chunked(rootChipCells, tileMesh), rootTileMeshes = chunked(rootTileCells, tileMesh);
+  for (const m of rootTileMeshes) m.visible = false;
 
   // ---------- Voxel text: rises from the floor in the top view, replaces the leaves ----------
-  const rise = { value: 0 };
-  // Opaque blocks as thick as a leaf layer. uRise (0..1, from setFlat) drives a pop wave: each
+  const rise = { value: 0 }, voxelFade = { value: 1 };
+  // Opaque blocks as thick as a leaf layer; they fade in with an ordered dither (screen-door:
+  // depth-correct, no transparency sorting, so overlapping blocks never ghost). uRise (0..1, from setFlat) drives a pop wave: each
   // block waits by its distance to mapCenter, then springs up with a back-out overshoot.
   const voxelMaterial = keep(new THREE.MeshLambertMaterial());
   voxelMaterial.onBeforeCompile = (shader) => {
     shader.uniforms.uRise = rise;
     shader.uniforms.uFill = mapFill;
     shader.uniforms.uCenter = mapCenter;
+    shader.uniforms.uFade = voxelFade;
+    shader.fragmentShader = `uniform float uFade;\n${BAYER_GLSL}\n` + shader.fragmentShader
+      .replace('#include <clipping_planes_fragment>', '#include <clipping_planes_fragment>\nif (bayer4(gl_FragCoord.xy) >= uFade) discard;');
     shader.vertexShader = 'uniform float uRise, uFill;\nuniform vec3 uCenter;\n' + shader.vertexShader
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vec3 blockAt = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
@@ -417,6 +511,10 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
   let flat = 0;
   return {
     group, size: { w: cols, h: rows }, floor: floorCells, crowns,
+    // Plot-local point just outside the patch where the walkway spur ends (main path joins), or null.
+    entry, walkways,
+    // Within SOLID cells of the text (plot-local): where the text trees stand (decor keeps off).
+    isText: (x, z) => { const c = Math.round(x + (cols - 1) / 2), r = Math.round(z + (rows - 1) / 2); return c >= 0 && r >= 0 && c < cols && r < rows && solid[r * cols + c] === 1; },
     isGrown: (cluster) => !!trees[cluster].built && trees[cluster].time >= forest.maxT && trees[cluster].built.leaves.visible,
     // Local plot coordinates -> is this a stone tile? (grass and props avoid the floor)
     isFloor: (x, z) => floorKeys.has(`${Math.round(x + (cols - 1) / 2) - (cols - 1) / 2},${Math.round(z + (rows - 1) / 2) - (rows - 1) / 2}`),
@@ -464,11 +562,15 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
       for (const m of leafMaterials) { m.transparent = fade.value < 1; m.depthWrite = fade.value === 1; }
       rise.value = THREE.MathUtils.clamp((p - 0.1) / 0.9, 0, 1);
       for (const v of voxelMeshes) v.visible = rise.value > 0;
+      for (const m of rootChipMeshes) m.visible = p < 0.5;
+      for (const m of rootTileMeshes) m.visible = p >= 0.5;
+      // Voxels fade in (dithered) while the leaves fade out.
+      voxelFade.value = smoothstep(p, 0.35, 0.85);
     },
     dispose() {
       trees.forEach((t, i) => { if (t.built) freeTree(i); });
       resources.forEach((r) => r.dispose());
-      [...tileMeshes, ...voxelMeshes].forEach((m) => m.dispose());
+      [...tileMeshes, ...rootChipMeshes, ...rootTileMeshes, ...voxelMeshes].forEach((m) => m.dispose());
     },
   };
 }

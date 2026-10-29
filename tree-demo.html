@@ -29,6 +29,10 @@
     <p class="eyebrow">◆ Top view</p>
     <h2>MINIMAP</h2>
     <p class="hint">Drag to pan · Scroll to zoom · WASD to move · ESC to return</p>
+    <div class="map-follow">
+      <label class="setting-toggle"><input id="map-follow" type="checkbox" /> <span>Follow player</span></label>
+      <label class="map-follow-smooth"><span>Smooth</span><input id="map-follow-smooth" type="range" min="0" max="1" step="0.05" aria-label="Follow smoothness" /><output id="map-follow-value"></output></label>
+    </div>
   </section>
 
   <nav id="dock" class="hotbar dock" aria-label="Garden controls">
@@ -54,6 +58,12 @@
         <input id="grow-range" type="range" min="15" max="150" step="5" value="40" />
       </label>
       <p class="hint">Trees grow when you come this close and shrink back once you walk 15 m further away.</p>
+      <p class="eyebrow settings-section">◆ Export scene</p>
+      <div class="export-buttons">
+        <button id="export-glb" class="settings-button" type="button">EXPORT GLB</button>
+        <button id="export-fbx" class="settings-button" type="button">EXPORT FBX</button>
+      </div>
+      <p id="export-status" class="hint">Exports what is shown now (no grass, sky or sea). GLB is the most reliable; open it in Blender to convert.</p>
     </section>
     <section id="tab-post" role="tabpanel" hidden>
       <label class="setting setting-toggle">

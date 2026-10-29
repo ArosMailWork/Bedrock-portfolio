@@ -25,7 +25,9 @@ obfuscated; no code, textures or algorithms were copied. Everything is a re-impl
 - `js/leaf-fall.js`: pooled falling leaves (384) from grown crowns near the player, blown by the wind. See "Wind".
 - `js/wind.js`: shared wind (direction + travelling gust field, GLSL `windOffset()` and JS `windAt()`).
 - `js/wind-lines.js`: Bruno-style wind line ribbons. `js/sky.js`: gradient sky dome + low-poly clouds.
-- `js/park.js`: lodge paths, plaza + fountain, hedges, bushes, flowers, lamps, benches, lodges,
+- `js/work-area.js`: WORK quadrant career road + social circle; `js/showcase.js`: Projects / Lab boards; `js/carnival.js`: SKILLS carnival booths (4 minigames); `js/interactive-points.js`: E-to-interact labels.
+- `js/park.js`: lodge paths, stepping-stone trails, plaza + fountain, hedges, bushes, flowers, lamps,
+  benches, lodges, clustered scatter + context-rule props (ferns, mushrooms, rocks, reeds, stumps, logs),
   beach rocks, shoreline fences, 3D grass. `PARK_COLORS` holds all prop colours.
 - `js/physics.js`: Rapier (`vendor/rapier/rapier.mjs`, @dimforge/rapier3d-compat 0.21.0,
   WASM embedded) static colliders + kinematic capsule character controller.
@@ -37,8 +39,9 @@ obfuscated; no code, textures or algorithms were copied. Everything is a re-impl
   longer referenced (kept on disk).
 
 ## Island, sea and layout
-- Plots sit in four quadrants around a central plaza (gaps 16 × 14, small fixed offsets).
-  Plot entrance = where the tiles end walking from the plot centre towards the plaza.
+- Plots sit in four quadrants around a central plaza (gaps 28 × 28, was 16 × 14: room for the ring
+  road and the cross axes; small fixed offsets). Plot entrance = end of the plot's walkway spur
+  (`view.entry`, tree-mesh.js), just outside the tiles at the corner facing the plaza.
 - Island radius is the smallest R keeping every plot tile (pad 2) and lodge (pad 6) within
   s ≤ 0.86 of the shore IN ITS OWN DIRECTION (shore wobbles ±12%).
 - Ground: polar mesh (220 segments, 0.01 rings near the shore), flat lawn to s = 0.92, sand slope
@@ -49,17 +52,182 @@ obfuscated; no code, textures or algorithms were copied. Everything is a re-impl
 - Sea: 1600² plane at y = -0.35. Colour by distance to the waterline (shallow → deep over 26 m),
   foam at the edge, rings travelling to the beach, thin streaks offshore. Uses scene fog.
 
+## WORK quadrant: career road + social circle (`work-area.js`, `interactive-points.js`)
+Owner request: ABOUT stays the garden; WORK becomes Bruno-style areas (career + social now,
+projects and lab next round); SKILLS will become carnival minigames (ném lon, bắn vịt, ném vòng,
+đập chuột); CONTACT unchanged. Mechanics ported from bruno-simon.com folio-2025 (MIT; sources
+CareerArea.js / SocialArea.js; licence in assets/textures/third-party/LICENSE-folio-2025.md), not
+copied verbatim (his code is WebGPU / TSL and driven by a Blender world). All shapes are code-built
+placeholders for the owner's own models. No sounds (owner handles audio).
+- Data: `CAREER` (start 'YYYY-MM', jobs: title, lines[], start / end 'YYYY-MM' | null, colour blue /
+  orange / purple / green) and `SOCIAL` (name, url, align; OnlyFans and Bluesky removed on owner
+  request, fan physics removed with them) in portfolio-data.js, sample values. WORK plot keeps only
+  its title (lines removed; projects move to the future Projects area).
+- Layout: garden.js builds the area before fixing the island radius (`bounds` feed `reach()`);
+  the road starts 1 m inside the WORK plot's north edge and runs north (-z), `WORK_AREA.lead` 4 m
+  before the first month and after the last, then the social circle (disc R = socialR + 2.5).
+  `covers(x, z)` is passed to buildPark as `keepClear`: no grass, scatter, rule props or stones there.
+- Career v2 (owner: parallel stone walls were unreadable; wanted Bruno's look exactly): one lane per
+  job on the road (no lane packing), `laneGap` 1.8, road half width = lanes + `margin` 1.2. Lane =
+  glowing line (0.09 m) between raised square pads (dark plinth 0.96 × 0.12 m with a glowing square
+  frame on top, `WORK_AREA.pad`; owner: like Bruno's); every lane has an end pad (the current
+  job's at this month). Line / pads dim (luminance 0.55) at rest, bright (1.7) while its block
+  is up. Block = dark pillar 0.45 × 1.1 with a glowing band; at rest it sits sunk in its pad with the
+  top just above the plinth (the dark square inside the frame = the parked block),
+  inside the span (padding 0.25) it floats `float` 0.55 m up (rate 3/s) and follows the player
+  (rate 10/s); past the end every block (the current job too, owner request) sinks into its end pad; the current
+  job's end pad sits at this month.
+  `yearM` 2.5 m per year (monthM = yearM / 12).
+- Label: Bruno-style text boxes (one dark box per line; title in the lane colour, other lines pale)
+  on a canvas (red = title, green = text, alpha = boxes), shown on a camera-facing quad (vertex-shader
+  billboard, laid out in view space: anchored bottom right, up-left of the block top, `label` 1/290 m
+  per px) so it reads from any angle incl. the minimap. Beyond `labelGrow` 12 m camera distance it
+  scales with the distance (constant on-screen size, ≤ 40×), so minimap labels stay readable at any
+  zoom. Stagger in screen space: level = lane index % 3, step = tallest label + 0.15 m (scaled too),
+  so labels of lanes up to two apart never overlap (the earlier world-y stagger did nothing from
+  above). Reveal left to right over 1 s after 0.3 s (power2.inOut), uv.x discard.
+- Month counter `MM/YY` (owner: short, month first): four seven-segment digits (Bruno's table) and a
+  fixed slanted slash bar, flat on a dark plate right against the EAST curb (0.35 m gap; moved there so
+  the up-left labels never cover it); follows the player along the span, shows start + floor(offset / monthM)
+  (≤ this month); unused bars sink to y -1, lit bars glow white × 1.7.
+- Social: statue placeholder (pedestal, shoulders, head; static collider) at the centre; links on a
+  half circle R 6 north of it (Bruno's angles), glowing ground rings.
+- Voxel crossfade (tree-mesh.js setFlat): voxel opacity = smoothstep(flat, 0.35, 0.85), transparent
+  below 1, depth writes only at 1 (owner: opaque voxels over the foliage looked harsh).
+- Interactive points (shared, for projects / lab later): DOM labels projected each frame; shown
+  within `POINTS.reveal` 7 m and on screen, nearest within `POINTS.active` 2.4 m is gold with an E
+  key cap; E / Enter or a click triggers. Hidden in the map and during transitions. Labels are not
+  CSS-zoomed (zoom would scale the projected translate).
+- Verified (Chrome, test-only spawn patch): stones rise / slide / reveal, blocks park in their end pads,
+  counter counts, link labels + E open the URL; no JS errors; tree tests pass.
+
+## Projects, Lab and carnival (`showcase.js`, `carnival.js`, focus mode in garden.js)
+- Focus mode (`stage` in garden.js, handed to the areas): `stage.focus(eye, look, onExit)` takes the
+  walking camera to a fixed pose (damped 5/s), stops walking / looking / interactive points / plot
+  marker / view toggle; Esc or `stage.release()` returns. `stage.hud(html)` fills `#focus-hud`
+  (bottom centre, scaled 0.82 so it stays clear of the board text).
+- Projects + Lab (after Bruno's ProjectsArea / LabArea; MIT): round paved patios (`SHOWCASE.patioR`
+  5.5 m) east of the career road (Projects 9 m, Lab 24 m north of the road start), each joined to the
+  curb by a short path. Board 4.6 × 2.8 m on posts facing the road, canvas texture 1024 × 624
+  (colour 0.92 so it does not bloom). E at the interactive point → focus 4.4 m in front. Projects:
+  ← → walks a project's images, then on to the next project (Bruno's order); Lab: ↑ ↓ pick from the
+  list on the left, ← → images. Enter / OPEN opens the url, chips for tags, footer "PROJECT n / N".
+  No images → a generated placeholder card. Clicking the board (owner request): from ≤ 14 m while
+  walking it opens the board; when open, the click's uv hits the board's hotspots (lab list rows, the
+  picture = next, drawn ◀ ▶ buttons bottom right, the link ↗). A drag (> 6 px) is not a click.
+  Patios now sit east of the month counter (x = counterRight + 1.5 + patioR); the connector paths pass
+  under the counter, which is lifted to y 0.09. Decor placeholders: anvil + glowing furnace (projects),
+  cauldron with glowing brew + candles (lab). Data: `PROJECTS`, `LAB` in portfolio-data.js.
+- Carnival v2 (SKILLS quadrant; owner: booths faced the wrong way, signs were one-sided, prizes not
+  wanted, games too easy, booths too small): four booths 5.2 × 3.6 × 3.5 m (layout: see "fair arc" below), each rotated (yaw = atan2(dir)) so its counter faces the centre; all booth parts, colliders
+  and game objects are built in booth-local space (`w(lx, ly, lz)` to world; rings convert the click ray
+  into the booth frame). Signs are two back-to-back planes on a dark board (readable both ways), name
+  only; outside skirt on the back wall. HUD: game name, status, "★ YOU WIN!" / "So close!" (no skill
+  text; `CARNIVAL` entries are just `{ game }`). Rules (`CARNIVAL_AREA.rules`):
+  - cans: 10-can pyramid (4-3-2-1, density 0.7) on a 2.2 m shelf, 5 balls; clear the shelf.
+  - ducks: two rails, ducks at 1.7 and -1.2 m/s (opposite ways, back row smaller), 12 hits in 20 s.
+  - rings: charge ping-pong 0.7 s, catch radius 0.12 m, 3 of 6 rings.
+  - moles: up 0.6 s, every 0.3–0.6 s, a miss costs 1 s, 15 in 30 s.
+- physics.js: `dynamic(kind, dims, x, y, z, opts)` (ball / cylinder, density, friction, restitution,
+  ccd); `GRAVITY` exported. The character controller does not push dynamic bodies.
+- Career fix (owner): every lane ends in a pad; the current job's end pad sits at this month and
+  its block sinks there too once passed (it used to stay up).
+- Verified (Chrome, test-only spawn patches): Projects / Lab focus, browsing, Esc back; cans won with
+  aimed clicks, ducks won, a ring caught, moles whacked; no JS errors; tree tests pass. Not verified:
+  real images on the boards (sample data has none), touch input.
+
+## ABOUT root chips, WORK tiled walkways, voxel dither, fair arc
+- ABOUT: the unpaved lawn garden (with butterflies.js) was tried and reverted on owner request; the
+  plot is paved. `buildTreeScene(..., { rootChips: true })` (ABOUT only): patch cells within trunk
+  radius + `ROOT_CHIPS` 0.9 m of a tree root are not floor (grass grows) and get two mesh sets:
+  broken chips (`rootChipMeshes`, shown while flat < 0.5, i.e. walking) and whole tiles
+  (`rootTileMeshes`, flat >= 0.5: minimap and the bake), so the text reads cleanly from above.
+  Text voxels in those cells are kept.
+- All plots: cells inside the walkway ring's outer band (distance to the text box < `WALK.ring[1]`)
+  are always inside the patch, so the tiles fill the whole walkway frame (owner screenshot).
+- WORK walkways v3 (owner: the tiled version broke the connections; wanted the smooth shapes with a
+  tile texture inside, circles in concentric rings): `curbRing(group, x, z, r, gaps, seed)` /
+  `curbStrip(group, x0, z0, x1, z1, { axis, gaps, curbFrom, curbTo })` (work-area.js). Surface =
+  pavers.js textures: `gridMaterial` (1 m square tiles, plot tile colours, UVs in metres / 4) on strips,
+  `radialMaterial(r)` (concentric 0.55 m rings of ~0.6 m bricks, every 3rd ring darker, round centre
+  stone) on discs. Curbs (0.2 × 0.14 m) open where walkways join: the circle opens for the road, the
+  road's east curb for each side path (`exits` passed from garden.js), each patio towards its path;
+  strip curbs stop where they meet a ring (`curbFrom` / `curbTo`), strip surfaces reach the circle
+  edge at the strip sides (slightly above the disc surface). The tile field (`buildTileField`) was
+  removed. Things on the walkways sit at `FLOOR` 0.04.
+- Month counter back on the lawn west of the road (0.45 m from the curb); career labels now sit
+  up-RIGHT of the blocks (quad anchored bottom left, view-space offset +0.3) so they never cover it.
+  Patios at curb + 3 + patioR.
+- Voxel fade = ordered 4×4 Bayer dither (`voxelFade` uniform, discard) instead of alpha: alpha
+  blending without depth writes let blocks behind show through blocks in front while zooming
+  (owner screenshot); the dither is depth-correct.
+- Fair v3 (owner: no plaza, no enclosure; one gentle row like the social links, then wider and more
+  spaced): booths on the lawn along an arc of radius `CARNIVAL_AREA.arc` 26 m, `spacing` 10.5 m, arc
+  centre 9 m inside the SKILLS plot's south edge (booths ~17 m south of it), facing the centre; no
+  checker plaza, no centre stage. `covers` = circles round each booth.
+- Known: a few small props from the tile-edge rule stand in root-chip cells and show as specks on the
+  tiles in the minimap.
+
+## Plot walkways as paths, scene export
+- Plot walkways (owner: make them like the main paths, orange inside, joined to the main path; add
+  benches / lamps): tree-mesh.js no longer draws bricks; it exports `view.walkways` (text box, ring
+  offset 2.5 + half width, rungs, spur from the ring corner to the entry) and `view.isText`.
+  park.js turns them into routes (`route(..., { half, colors: PALETTE.tileWalk, onTiles, walk })`): ring =
+  closed curve round the text box with circular corners, rungs straight, spur ending 0.8 m past the
+  entry. They are raised by `WALK_Y` 0.055 over the tiles (per-point y; the quads add p.y); the spur's
+  last stretch (from the tile edge to the entry) slopes down to the main path height, so the two
+  meet flush. Curbs stay on tiles for walkways (`onTiles`) and open where routes join (`onPath` now
+  uses each route's own half width). Every ~9 m along a walkway a lamp or a bench (alternating,
+  bench facing the path) where 5 probe points are tiles off the text, ≥ 6 m from other furniture.
+  Trade-off: the walkways now show clearly in the minimap too.
+- Scene export (Settings > GARDEN > Export, `js/scene-export.js`, owner asked for FBX; three.js has no
+  FBX exporter): `bakeScene` collects visible meshes (skips skipBake / skipExport objects: sky, clouds,
+  wind lines, falling leaves, player, grass; and shader materials: sea, sky, career labels), world
+  transforms baked, colours as vertex colours, faces looking straight down dropped. GLB: three's
+  GLTFExporter (vendor/three/addons/exporters, r186) with instanced meshes kept as
+  EXT_mesh_gpu_instancing (measured 22 MB, 1806 meshes, 327 instanced). FBX: own ASCII 7.4 writer
+  (indexed triangles, ByVertice normals / colours / UVs, Y up, UnitScaleFactor 100 = metres), instances
+  merged (measured ~280 MB, ~4.4 M vertices, mostly the plot tiles). Verified: GLB header / JSON, FBX
+  round trip through three's FBXLoader on a 60-mesh sample (vertex counts match, colours present);
+  not opened in Blender (not installed). Blob type octet-stream (Chrome cancelled model/gltf-binary
+  downloads in tests); URLs revoked after 60 s.
+
 ## Park dressing (`buildPark`)
-Paths: centripetal Catmull-Rom. Each starts hidden under the plaza disc and leaves radially.
-Plot paths were removed (plots erode into the lawn instead, see the update section);
-lodge paths bend gently and end at the doorstep. Two-tone paving quads with raised white curbs.
-Hedge stretches (only from the 7th sample, never at junctions) alternate sides; flowers opposite;
-one lamp on long paths only. Path-mouth bushes are skipped where they would touch a path.
-Plaza: curb ring, paving, tiered fountain. Two benches. Lodges: cream walls,
-terracotta pyramid roof, chimney, door + windows facing the plaza. Up to 130 round
-(icosahedron) bushes, flanking path mouths and clustered on the lawn. Beach rocks, two broken
-shoreline fence arcs. Colliders: hedges, bushes, lamps, benches, lodges, fences, fountain,
-trunks, entrance sign posts. Flowers, rocks and grass have none.
+Path network (owner request after classic park plans: radial axes + ring dividing four zones,
+one plot per zone; main paths poke into the plots and branch inside). Routes are planned first,
+then drawn (`route()`): centripetal Catmull-Rom paving ribbons, two-tone paving, raised white
+curbs; a curb segment is dropped where it lies on another route's paving, on tiles or in the plaza.
+- Ring road: closed curve at `RING_R` 13 m (y 0.045, so it covers radial paths where they cross).
+- E/W axes: plaza → lodge doors (bend ±2). N/S axes: plaza → round lookouts (`LOOKOUT_R` 3 m disc,
+  bench facing out, lamp) 4 m past the farthest plot on that side (bend ±1.5).
+- Spurs: ring road → each plot entrance, finishing 1.5 m under the tiles; the plot walkway
+  (tree-mesh.js `WALK`) continues inside: basket-weave brick ring round the text, rungs in wide
+  line gaps, wide spur to the corner. Plain on foot, faint in the minimap (tile colours flatten).
+Hedge stretches (only from the 7th sample) alternate sides; flowers opposite; one lamp on long
+routes. No hedges / flowers / lamps near another route, hedges never under a lamp and vice versa.
+Path-mouth bushes are skipped where they would touch a path.
+Plaza: curb ring, paving, tiered fountain. Four benches on the diagonals (the axes stay open). Lodges: cream walls,
+terracotta pyramid roof, chimney, door + windows facing the plaza. Round (icosahedron) bushes
+flank path mouths. Beach rocks, two broken shoreline fence arcs. Colliders: hedges, bushes, lamps,
+benches, lodges, fences, fountain, trunks, entrance sign posts, stumps, logs. Flowers, rocks,
+ferns, mushrooms, reeds, stepping stones and grass have none.
+Natural dressing (owner request, ideas after Townscaper; no assets / code taken). New props use
+their own random stream (`mulberry32(11)`) so the older props keep their places.
+- Lawn pockets inside plots were tried and removed (owner: the tile ring round each pocket read as
+  a border road; plots stay fully paved like WORK).
+- Stepping-stone shortcuts (`STONES`): 7-sided slabs with a jittered rim (3 shapes), zig-zag along a
+  centripetal Catmull-Rom; no stones on tiles, paths or near lodges. From ~55% along each spur to
+  the nearest point (outside the ring, 6–26 m away) of each neighbouring axis. The earlier
+  plaza → plot stone trails were replaced by the spurs.
+- Clustered scatter (`SCATTER`: spacing 11 m, max 260, fade 25–110 m from plots / plaza): Poisson-disk
+  cluster centres accepted by noise × distance fade; kinds bushes / meadow / ferns / rocks / dead wood
+  (`KINDS` weights); members bunched around the centre. Replaced the evenly spread bush clumps.
+- Context rules: lawn cells touching tiles → clumped wildflowers / pebbles / ferns; trees with lawn
+  within 2.2 m → ferns (+ 35% a mushroom) at the base; each trail mouth → lamp opposite the sign;
+  each lodge path → bench on the outer side of its strongest bend (flower side, flowers cleared);
+  lodge back corners → bushes; shore band (0.865–0.89 R, not on the fence arcs) → reed clumps.
+- Soft edges: grass grows up to 0.12 m past the path half-width (over the curb) and around stones,
+  with short tufts (0.15–0.33 m) within 0.45 m of paths / 0.25 m of stones.
 Grass (after bruno-simon.com): one thin triangle per blade, sampled every 0.32 m, ~8% sparse lawn
 plus dense noise patches, tall around plot edges. Instance colour = `groundColor()` at the root,
 shader blends to `PARK_COLORS.grassTip` towards the tip, both faces use the up normal, so the field
@@ -326,6 +494,9 @@ blur. ICQR's bundle is obfuscated; this follows the owner's description, no code
   instant 14% jump with 0.0015); every frame `update()` log-eases the view towards it at `zoomEase`
   10/s (measured: settles in ~0.35 s), keeping the world point under the cursor fixed. Drag, show()
   and flyTo() cancel the pending zoom; prefers-reduced-motion jumps straight to the target.
+  Follow player (`MAP2D.follow`, minimap panel toggle + "Smooth" slider, default off / 0.5): while on
+  and not dragging / flying, the view centre damps towards the player at rate lerp(25, 1.2, smooth)
+  per second; wheel zoom then zooms around the screen centre (only the scale steps).
   `image-rendering: pixelated` when
   magnified beyond the image (crisp pixel-art). Player = dot updated every frame (WASD still moves
   the player, screen axes). Background = image corner colour; CSS violet vignette like the post pass.
