@@ -5,6 +5,10 @@ body { height: 100vh; overflow: hidden; }
 #scene { position: fixed; inset: 0; }
 #scene canvas { display: block; }
 button { font-family: inherit; cursor: pointer; }
+/* Whole HUD scale (panels, dock, key hints). The plot marker scales by transform instead: zoom
+   would also scale the left / top that garden.js sets from screen coordinates. */
+:root { --hud-zoom: 1.15; }
+.hud-panel, .dock, .controls { zoom: var(--hud-zoom); }
 
 .hud-panel {
   position: fixed;
@@ -42,10 +46,13 @@ button { font-family: inherit; cursor: pointer; }
 #view-toggle[data-view="map"] .icon-camera { display: block; }
 
 /* ---------- Settings (slides out next to the dock) ---------- */
-#settings { top: 20px; right: 84px; width: 260px; max-height: calc(100vh - 40px); overflow-y: auto; animation: slide-in .18s ease-out; }
-.settings-section { margin-top: 18px; }
+#settings { top: 20px; right: 84px; width: 300px; max-height: calc((100vh - 40px) / var(--hud-zoom)); overflow-y: auto; animation: slide-in .18s ease-out; }
+.settings-tabs { display: flex; gap: 4px; margin: 6px 0 14px; }
+.settings-tab { flex: 1 1 auto; padding: 6px 8px; white-space: nowrap; font-family: var(--font-headings); font-size: .95rem; color: var(--text-dim); background: #252528; border: 2px solid #363330; border-bottom-width: 3px; }
+.settings-tab:hover, .settings-tab:focus-visible { border-color: var(--gold); }
+.settings-tab[aria-selected="true"] { color: var(--gold); border-color: var(--gold); }
 .setting-toggle input { accent-color: var(--grass-bright); width: 16px; height: 16px; }
-#post-controls .setting { margin-bottom: 6px; }
+#post-controls .setting, #move-controls .setting { margin-bottom: 6px; }
 .settings-button { width: 100%; margin-top: 6px; padding: 8px; font-family: var(--font-headings); font-size: .9rem; color: var(--text-main); background: #252528; border: 2px solid #363330; border-bottom-width: 3px; cursor: pointer; }
 .settings-button:hover, .settings-button:focus-visible { border-color: var(--gold); }
 @keyframes slide-in { from { opacity: 0; transform: translateX(12px); } }
@@ -69,7 +76,7 @@ kbd { min-width: 26px; height: 26px; display: inline-grid; place-items: center; 
 kbd.wide { min-width: 52px; }
 
 /* ---------- Plot marker (diamond above the nearby plot) ---------- */
-.plot-marker { position: fixed; z-index: 2; border: 0; background: transparent; color: var(--gold); transform: translate(-50%, -50%); padding: 15px; display: flex; align-items: center; }
+.plot-marker { position: fixed; z-index: 2; border: 0; background: transparent; color: var(--gold); transform: translate(-50%, -50%) scale(var(--hud-zoom)); padding: 15px; display: flex; align-items: center; }
 .diamond { display: grid; place-items: center; width: 30px; height: 30px; background: var(--coal); border: 3px solid var(--gold); transform: rotate(45deg); box-shadow: 0 0 0 4px #0009, 0 0 14px #f5c54266; }
 .diamond span { transform: rotate(-45deg); font-size: 20px; }
 .marker-label { position: absolute; right: 56px; white-space: nowrap; font-family: var(--font-headings); font-size: 1rem; color: var(--text-main); background: #13121ae6; border: 2px solid var(--border); padding: 6px 12px; opacity: 0; transform: translateX(8px); transition: opacity .2s, transform .2s; pointer-events: none; }
@@ -82,7 +89,7 @@ body.map-view .controls { display: none; }
   .garden-heading { top: 12px; left: 12px; padding: 12px 14px; }
   .directory, .lead { display: none; }
   .controls { left: 12px; bottom: 12px; gap: 8px; }
-  #settings { right: 76px; width: min(240px, calc(100vw - 100px)); }
+  #settings { right: 76px; width: min(280px, calc((100vw - 100px) / var(--hud-zoom))); }
 }
 
 .map-link { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px; border: 1px solid #ffffff25; background: #ffffff08; color: inherit; font-size: 1rem; }
@@ -90,3 +97,11 @@ body.map-view .controls { display: none; }
 .map-link:focus-visible { outline: 2px solid var(--gold); }
 
 .map-link:disabled { opacity: .45; cursor: default; }
+
+/* ---------- 2D map mode (map2d.js) ---------- */
+#map2d { position: fixed; inset: 0; z-index: 1; overflow: hidden; cursor: grab; opacity: 0; touch-action: none; }
+#map2d.dragging { cursor: grabbing; }
+#map2d .map2d-image { position: absolute; left: 0; top: 0; transform-origin: 0 0; image-rendering: auto; }
+#map2d .map2d-player { position: absolute; left: -7px; top: -7px; width: 14px; height: 14px; border-radius: 50%; background: #f0b46e; box-shadow: 0 0 0 3px #fff, 0 2px 6px #0006; }
+/* Same violet vignette as the 3D post pass, so the crossfade does not jump. */
+#map2d::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse 60% 70% at center, transparent 45%, rgba(70, 50, 120, .35) 100%); }

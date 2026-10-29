@@ -10,8 +10,12 @@ obfuscated; no code, textures or algorithms were copied. Everything is a re-impl
 - `tree-demo.html`, `css/garden.css`: keyyard-style HUD (uses `css/base.css` tokens: Jersey10 / VT323 /
   Inter, pixel blocks, hotbar). Heading + generated directory (top left), vertical icon dock
   (right): view toggle (map icon ↔ camera icon), settings, replay growth. Settings panel slides
-  out with the tree grow-range slider (15–150 m, default 40) and the Post processing section
-  (checkbox, 9 sliders built from `POST_CONTROLS`, reset button). Pixel SVG icons are inline.
+  out with three tabs (`.settings-tab`, one `role="tabpanel"` section visible): GARDEN (tree
+  grow-range slider, 15–150 m, default 40), POST (checkbox, 9 sliders built from `POST_CONTROLS`,
+  reset button), MOVE (sliders built from `MOVE_CONTROLS` in garden.js, boost hint, reset button).
+  Pixel SVG icons are inline. Whole HUD scaled by `--hud-zoom` 1.15 (CSS `zoom` on `.hud-panel`,
+  `.dock`, `.controls`; the plot marker uses `transform: scale` because garden.js positions it by
+  screen left / top). Settings panel 300 px wide, tabs size to their label (no overflow).
   Loads `vendor/howler/howler.min.js` (classic script → `window.Howl`, `window.Howler`).
   Howler is only loaded; no sounds are wired (the owner handles audio).
 - `js/portfolio-data.js`: placeholder portfolio content (short lines → smaller plots).
@@ -74,8 +78,14 @@ damping (6/s grounded, 1.5/s airborne), so jumps read on screen. Camera collisio
 from the shoulder (excluding the player body) shortens the arm. No wheel zoom while walking.
 WASD/arrows move relative to camera yaw (screen axes in the minimap). Momentum: keys set a target
 velocity; while a key is held the velocity moves towards it linearly, reaching full speed
-`RAMP_S` 0.15 s after starting from rest (measured: 3.0 m/s @50 ms, 5.5 @100 ms, 8.1 @150 ms).
-Released: damps at `DECEL` 10/s (≈1.3 m glide). `WALK_SPEED` 8 m/s, Shift = `RUN_SPEED` 14 m/s.
+`MOVE.rampS` 0.15 s after starting from rest. All values live in `MOVE` (defaults `MOVE_DEFAULTS`,
+editable in Settings > MOVE). Slowing down (keys released, or a lower target after run / boost) it
+glides: exponential damping at 3 / `stopGlide` per second, `stopGlide` 0.6 s (was a fixed 0.3 s,
+owner wanted more slide at the end). `walkSpeed` 8 m/s, Shift = `runSpeed` 14 m/s.
+Boost: a second Shift press within `doubleTap` 0.3 s, then held: the target speed climbs linearly
+from runSpeed to `boostX` 10 × walkSpeed (80 m/s) over `boostTime` 4 s while moving; releasing
+Shift (or window blur) ends it and the speed glides back down. Hop rate is capped at running
+pace. At boost speed tree growth (grow range 40 m) visibly lags behind the player.
 Hop-and-wobble (after the game "We Become What We Behold"): body + eyes live in a `visual` group
 inside the physics-driven `player`; `animateHop()` hops `HOP.height` 0.25 m at `HOP.rate` 3.2
 hops/s at walking speed (faster when running), leans ±`HOP.lean` 0.17 rad alternating per hop,
@@ -299,31 +309,71 @@ chunking allowed as needed. Body wrap width is provisional (owner will decide a 
 - Fix: clouds were visible in the minimap because `visible` received `null` (three only skips
   objects whose `visible === false`); now a boolean.
 
-## Baked minimap (`js/map-bake.js`)
-Problem (owner screenshot, island R 570 m): far minimap zoom showed the plot floors missing, the
-shore flickering. Causes: near 0.1 / far ~2000 m gives ~1 m depth error at 1.2 km height (6 cm
-floor tiles lose to the ground, shore and sea z-fight), plus tens of thousands of sub-pixel voxels.
-- Once after loading, an orthographic camera straight above the island (half-extent 1.15 R) renders
-  the map state into a 4096² (≤ GPU max) 4× MSAA render target with mipmaps + anisotropy 8:
-  `setFlat(1)` on plots and park, fillers/bark hidden, `mapFill` 1, no fog, sun shadow frustum over
-  the whole island. Hidden while baking: everything with `userData.skipBake` (sky dome, clouds, wind
-  lines, falling leaves, player, the bake plane). ~0.32 m per pixel for R 570.
-- A plane (y 0.9, renderOrder 10, `MeshBasicMaterial`, no fog) shows the image; alpha = crossfade ×
-  smoothstep border (6%) so it melts into the live sea. Crossfade = smoothstep(camera height,
-  `MAP_BAKE.from` 200, `to` 300), only in the minimap (not while leaving it).
-- Fully baked (crossfade 1): camera renders only layer `MAP_BAKE.layer` (1): bake plane, live sea,
-  player marker, hemisphere + sun; shadow map not updated; "C:\Users\PC\AppData\Roaming\kazuo-ai\ai-chat\bin\rtk.exe" tree streaming paused.
-- Near plane follows the camera height: clamp(0.008 × height, 0.1, 15).
-- Measured (headless): minimap at 1000 m: 16 draw calls / 406 triangles (was ~400 calls / 2.2 M);
-  250 m crossfade 259 calls; load 1.6 s (bake included). Round trip walk → map → walk restores
-  layers and shadows.
-- Not live in the image: moving things (player is drawn live), tree growth state. The bake does not
-  re-run when content changes at runtime (content is static).
+## Map mode: 3D transition + flat 2D map (`map-bake.js`, `map2d.js`)
+Owner request: the map is a real flat 2D view (like any web map), reached through an ICQR-like
+animation (voxel text pops up while the camera flies over), with an angled camera path and motion
+blur. ICQR's bundle is obfuscated; this follows the owner's description, no code taken.
+- Bake (once after loading, `bakeMap()`): orthographic camera above the island (half-extent 1.15 R,
+  north up), map state (setFlat(1): voxels fully popped, trees / grass hidden; fillers, bark off;
+  mapFill 1; no fog; island-wide shadow frustum), 4× MSAA half-float target → `post.grade()` (same
+  exposure / contrast / saturation / split toning as the screen, no blur / bloom / vignette) into an
+  sRGB 8-bit target → `readRenderTargetPixels` → rows flipped into a 2D `<canvas>` (4096², ≤ GPU max).
+  `userData.skipBake` objects (sky, clouds, wind lines, falling leaves, player) are hidden.
+- 2D map (`createMap2D`): fixed DOM layer (z-index 1, under the HUD) with the canvas positioned by a
+  CSS transform. View = world point at the screen centre + CSS px per metre. Drag pans, wheel zooms
+  around the cursor (min = whole image fits, `MAP2D.maxPpm` 80). Smooth wheel zoom: each wheel event
+  only moves a target scale by exp(-delta × `wheelStep` 0.0008) (one 100-unit notch = 7.7%, was an
+  instant 14% jump with 0.0015); every frame `update()` log-eases the view towards it at `zoomEase`
+  10/s (measured: settles in ~0.35 s), keeping the world point under the cursor fixed. Drag, show()
+  and flyTo() cancel the pending zoom; prefers-reduced-motion jumps straight to the target.
+  `image-rendering: pixelated` when
+  magnified beyond the image (crisp pixel-art). Player = dot updated every frame (WASD still moves
+  the player, screen axes). Background = image corner colour; CSS violet vignette like the post pass.
+  While the map is shown (after its 0.25 s fade-in) the 3D scene is not rendered (measured: 1 draw
+  call, i.e. nothing but a final clear).
+- Walk → map (`startTransition(true, …)`, `TRANSITION_S` 1.2 s): ICQR-like spiral. The camera
+  climbs and turns at the same time around the destination (player, or plot centre from the plot
+  marker): distance log-lerped to `MAP_HEIGHT` 80 m (plots: max(80, plotViewSize)), polar angle
+  lerped to top-down, heading (azimuth) turning the short way round to north (0), all on one
+  `cinematic` ease (smootherstep on a warped clock: gentle start, early peak, long settle). No roll:
+  camera.up = world up tilted to the heading by the polar angle (north at the top-down end), then
+  lookAt; the old quaternion slerp + lookAt mix (roll wobble near top-down) and `SWING` were removed.
+  Layers follow the camera height (below), no separate timing: climbing, trees sink and voxels pop.
+  At the end the map view takes over at exactly the same framing (`ppmAt(height)`).
+- Map → walk: if the baked look still shows (`map2d.fill` > 0), the 2D view first flies (0.45 s) in
+  to `clearPpm` (magnification `MAP2D.fill[0]`), then the reverse spiral runs from heading north.
+  Descending, voxels sink and 3D trees return as soon as the camera drops below 45 m (fully 3D
+  under 20 m, ~37% into the flight thanks to the log distance + early-peak ease).
+- View layers = one rule of camera height y, `applyLayers(y)` in garden.js, used by the map zoom and
+  both flights (was: time windows per direction, voxels lingered on the way back): flat =
+  smoothstep(y, `TREE_HEIGHTS` 20, 45) (3D trees ↔ voxel text); higher up `mapFill` =
+  `map2d.fillAt(ppmAt(y))` (smoothstep of image magnification 3.2 → 1.6, `MAP2D.fill`) morphs the
+  live view into the baked look (tiles flat-coloured and gap-free, voxels flattened to 0.2 × height,
+  no perspective block sides); in map mode the baked image then fades in over 1.6 → 0.9
+  (`imageFade`), blending two matching pictures.
+- Voxels (tree-mesh.js): opaque, `VOXEL.height` 1.2 m (a leaf-layer-thick block). Pop wave: uRise =
+  (flat − 0.1) / 0.9; each block waits 0–0.6 by its distance to `mapCenter` (0–`VOXEL.spread` 60 m),
+  then springs up over 0.4 with a back-out overshoot while its footprint grows in. Height × mix(1,
+  0.2, uFill): flat slabs in the far map and in the bake.
+- Motion blur (post.js composite, transitions only): 12 taps along `uMotion` (screen movement of the
+  destination point since the last frame × `MOTION_BLUR.pan` 1.0) plus a radial smear `uZoomBlur`
+  (relative change of camera distance × 0.8), each clamped (0.04 / 0.08 UV). Haze reduced to 0.35;
+  tilt-shift band blur off.
+- Near plane = clamp(0.008 × height, 0.1, 15) (depth precision during high flights).
+- Floor: tiles always cover cells within `PAVED` 4 of the text (Chebyshev dilation) and never erode
+  within `SOLID` 3; `MARGIN` 6. Before, only the 5×5 neighbourhood was paved and only direct
+  neighbours were protected, so body text edges showed lawn (owner screenshot).
+- Removed: 3D minimap zoom / pan, the baked plane crossfade and its render layer, viewBlend, mapFill
+  by height.
+- Verified (headless): load 1.6 s incl. bake; colours and framing of the last 3D frame and the 2D map
+  match (screenshots); walk → map → (wheel zoom out, whole island) → Esc → walk round trip.
 
 ## Range, growth and culling
 Each tree activates within `treeSettings.growRange` m (default 40, settings slider) of the observer
 (player when walking, map centre in minimap) and stays active until range + 15 m. Reversible pop timeline: branch mesh scale 0 → 1.2 → 1 and
-lift 0 → 0.5 → 0; its foliage starts 0.7 s later with the same curve. Per-tree bounding spheres
+lift 0 → 0.5 → 0; its foliage starts 0.7 s later with the same curve. A freshly built tree is
+hidden until the next tick poses it (builds run after the per-tree updates; before, it flashed for
+one frame at full size with unplaced leaves before the pop started). Per-tree bounding spheres
 (covering the 1.2 overshoot) are frustum-tested each frame after the camera update; hidden trees
 defer matrix updates. Plots inside the minimap view stay active.
 

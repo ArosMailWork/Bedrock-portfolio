@@ -34,8 +34,14 @@ export const FILLER_SCALE = 1.3;
 // 0..1 when the minimap is zoomed far out: voxels and tiles grow to close their sub-pixel gaps
 // (which flickered while panning) and tile colours flatten so the text stays crisp.
 export const mapFill = { value: 0 };
+// Voxel pop for the map transition: voxels spring up in a wave spreading from this world point
+// (garden.js sets it to the transition's destination); VOXEL.spread metres reach the last delay.
+export const mapCenter = { value: new THREE.Vector3() };
+export const VOXEL = { height: 1.2, spread: 60 };
 
-const MARGIN = 4;        // stone border around the text, in cells
+const MARGIN = 6;        // stone border around the text, in cells
+const PAVED = 4;         // cells around the text that are always paved
+const SOLID = 3;         // cells around the text that never erode (tilt / chip / lawn)
 const SIDES = 8;         // low-poly branch cross-section (smooth radial normals hide the facets)
 const hash = (x, z) => { const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return s - Math.floor(s); };
 const pick = (list, r) => list[Math.floor(r * list.length) % list.length];
@@ -251,6 +257,9 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
     leaves.receiveShadow = true;
     entries.forEach((leaf, k) => leaves.setColorAt(k, color.setScalar(0.9 + leaf.shade * 0.2)));
     leaves.boundingSphere = t.bounds.clone();
+    // Built after this frame's tree updates: hidden until the next tick has posed it at its growth
+    // time (scale 0), otherwise it flashes for one frame at full size with unplaced leaves.
+    trunk.visible = leaves.visible = false;
     group.add(trunk, leaves);
     // Random spin in the leaf plane, tilt up to ~72 degrees from flat, random heading.
     const rotations = entries.map((l) => new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2 + l.tilt, l.yaw, l.shade * 6.28, 'YXZ')));
@@ -283,14 +292,25 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
   const col0 = MARGIN, row0 = MARGIN;
   const inkAt = (c, r) => { const mc = c - col0, mr = r - row0; return mc >= 0 && mr >= 0 && mc < mask.w && mr < mask.h && mask.cells[mr * mask.w + mc]; };
   const kindAt = (c, r) => (mask.kind ? mask.kind[(r - row0) * mask.w + (c - col0)] : 0);
-  const nearInk = (c, r) => { for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) if (inkAt(c + dc, r + dr)) return true; return false; };
+  // Square (Chebyshev) dilation of the ink: cells within d of any ink cell.
+  const dilate = (d) => {
+    const row = new Uint8Array(cols * rows), out = new Uint8Array(cols * rows);
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      for (let k = -d; k <= d && !row[r * cols + c]; k++) if (inkAt(c + k, r)) row[r * cols + c] = 1;
+    }
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+      for (let k = -d; k <= d && !out[r * cols + c]; k++) if (r + k >= 0 && r + k < rows && row[(r + k) * cols + c]) out[r * cols + c] = 1;
+    }
+    return out;
+  };
+  const paved = dilate(PAVED), solid = dilate(SOLID);
   // 1. Organic outline.
   const inside = new Uint8Array(cols * rows);
   for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     const x = c - (cols - 1) / 2, z = r - (rows - 1) / 2;
     const nx = x / (cols / 2), nz = z / (rows / 2), a = Math.atan2(nz, nx);
     const wobble = 1 + 0.1 * Math.sin(a * 5 + seed) + 0.05 * Math.sin(a * 11 + seed * 2);
-    if (nearInk(c, r) || (nx ** 4 + nz ** 4) * wobble <= 1) inside[r * cols + c] = 1;
+    if (paved[r * cols + c] || (nx ** 4 + nz ** 4) * wobble <= 1) inside[r * cols + c] = 1;
   }
   // 2. Distance (in cells, max 4) from each inside cell to the lawn.
   const edge = new Uint8Array(cols * rows).fill(9);
@@ -309,7 +329,7 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
     if (!inside[r * cols + c]) continue;
     const x = c - (cols - 1) / 2, z = r - (rows - 1) / 2, rnd = hash(x + seed, z), rnd2 = hash(z - seed, x * 1.3);
     const ink = inkAt(c, r), e = edge[r * cols + c];
-    const protectedCell = ink || [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dc, dr]) => inkAt(c + dc, r + dr));
+    const protectedCell = solid[r * cols + c] === 1;
     const wear = protectedCell || e > 4 ? 0 : 1 - KEEP[e];
     if (rnd2 < wear) {
       if (rnd < 0.55) chips.push({ x: x + (rnd - 0.5) * 0.5, z: z + (rnd2 - 0.5) * 0.5, rnd, size: 0.25 + rnd * 0.3 });
@@ -360,14 +380,25 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
 
   // ---------- Voxel text: rises from the floor in the top view, replaces the leaves ----------
   const rise = { value: 0 };
-  const voxelMaterial = keep(new THREE.MeshLambertMaterial({ transparent: true, opacity: 0, depthWrite: false }));
+  // Opaque blocks as thick as a leaf layer. uRise (0..1, from setFlat) drives a pop wave: each
+  // block waits by its distance to mapCenter, then springs up with a back-out overshoot.
+  const voxelMaterial = keep(new THREE.MeshLambertMaterial());
   voxelMaterial.onBeforeCompile = (shader) => {
     shader.uniforms.uRise = rise;
     shader.uniforms.uFill = mapFill;
-    shader.vertexShader = 'uniform float uRise, uFill;\n' + shader.vertexShader
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y *= uRise;\ntransformed.xz *= mix(1.0, 1.0 / 0.96, uFill);');
+    shader.uniforms.uCenter = mapCenter;
+    shader.vertexShader = 'uniform float uRise, uFill;\nuniform vec3 uCenter;\n' + shader.vertexShader
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vec3 blockAt = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+        float delay = clamp(distance(blockAt.xz, uCenter.xz) / ${VOXEL.spread.toFixed(1)}, 0.0, 1.0) * 0.6;
+        float t = clamp((uRise - delay) / 0.4, 0.0, 1.0), u = t - 1.0;
+        float popY = 1.0 + 2.70158 * u * u * u + 1.70158 * u * u;   // back-out
+        // uFill (zoomed far out / baked map): blocks flatten to a thin slab, so the perspective
+        // view shows no block sides and matches the straight-down baked image.
+        transformed.y *= max(popY, 0.0) * mix(1.0, 0.2, uFill);
+        transformed.xz *= mix(1.0, 1.0 / 0.96, uFill) * min(t * 1.6, 1.0);`);
   };
-  const voxelGeo = keep(new THREE.BoxGeometry(0.96, 0.6, 0.96).translate(0, 0.3, 0));
+  const voxelGeo = keep(new THREE.BoxGeometry(0.96, VOXEL.height, 0.96).translate(0, VOXEL.height / 2, 0));
   const voxelMeshes = chunked(voxelCells, (list) => {
     const voxels = new THREE.InstancedMesh(voxelGeo, voxelMaterial, list.length);
     // One flat colour per text kind and one height: the minimap text must read cleanly.
@@ -431,10 +462,8 @@ export function buildTreeScene(forest, mask, { colors = PALETTE.leaf, bodyColors
       sink.value = smoothstep(p, 0.05, 0.8);
       fade.value = 1 - smoothstep(p, 0.65, 0.8);
       for (const m of leafMaterials) { m.transparent = fade.value < 1; m.depthWrite = fade.value === 1; }
-      rise.value = 1;
-      voxelMaterial.opacity = smoothstep(p, 0.05, 0.5);
-      voxelMaterial.depthWrite = voxelMaterial.opacity === 1;
-      for (const v of voxelMeshes) v.visible = voxelMaterial.opacity > 0;
+      rise.value = THREE.MathUtils.clamp((p - 0.1) / 0.9, 0, 1);
+      for (const v of voxelMeshes) v.visible = rise.value > 0;
     },
     dispose() {
       trees.forEach((t, i) => { if (t.built) freeTree(i); });

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { maskFromPixelFont, maskFromBody } from './shape-mask.js';
 import { planForest } from './shape-tree.js';
-import { buildTreeScene, wind, treeSettings, fillerFade, barkFade, seeThrough, mapFill, SUN_OFFSET } from './tree-mesh.js';
+import { buildTreeScene, wind, treeSettings, fillerFade, barkFade, seeThrough, mapFill, mapCenter, SUN_OFFSET } from './tree-mesh.js';
 import { PLOTS } from './portfolio-data.js';
 import { buildGround, buildWater, shoreRadius, WALK_LIMIT } from './island.js';
 import { buildPark } from './park.js';
@@ -11,7 +11,8 @@ import { createLeafFall } from './leaf-fall.js';
 import { updateWind } from './wind.js';
 import { createWindLines } from './wind-lines.js';
 import { createSky, SKY } from './sky.js';
-import { createMapBake, MAP_BAKE } from './map-bake.js';
+import { bakeMap } from './map-bake.js';
+import { createMap2D } from './map2d.js';
 
 // ---------- Renderer, light and atmosphere ----------
 const renderer = new THREE.WebGLRenderer({ antialias: false }); // MSAA happens in the post target
@@ -28,8 +29,6 @@ scene.fog = fog;
 const hemisphere = new THREE.HemisphereLight(0xfff0e0, 0x6a58d6, 1.5);
 scene.add(hemisphere);
 const sun = new THREE.DirectionalLight(0xffd2c2, 2.9);
-// Lights also shine on the few objects drawn over the baked minimap (layer MAP_BAKE.layer).
-hemisphere.layers.enable(MAP_BAKE.layer); sun.layers.enable(MAP_BAKE.layer);
 sun.castShadow = true;
 // Sharp shadows: a small frustum around what the camera looks at (2048 px over 48 m = 2.3 cm per
 // texel while walking), widened in the minimap. The frustum is snapped to whole texels so
@@ -53,30 +52,51 @@ const settingsToggle = document.querySelector('#settings-toggle');
 const settingsPanel = document.querySelector('#settings');
 const growRange = document.querySelector('#grow-range');
 const growRangeValue = document.querySelector('#grow-range-value');
-let park = null, leafFall = null, mapBake = null;
+let park = null, leafFall = null, map2d = null;
 const status = document.querySelector('#status');
 const keys = new Set(), plots = [];
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
-let mode = 'walk', nearby = null, selected = null, transition = null, islandR = 60;
+let mode = 'walk', nearby = null, transition = null, islandR = 60; // mode: walk | entering | map | leaving-2d | leaving
 const target = new THREE.Vector3(), projected = new THREE.Vector3(), desired = new THREE.Vector3();
 let cameraFloor = 0; // camera follows height slowly, so jumps read on screen
 let armScale = 1;    // 0..1 share of the shoulder arm left after camera collision (smoothed)
-let mapHeight = 80, zoomHeight = 80, yaw = 0.25, pitch = 0.1, jumpQueued = false, character = null;
-const MAP_MIN_HEIGHT = 34; // closest minimap zoom: stays above the tallest canopy (~12 m)
-let mapMaxHeight = 260;    // farthest minimap zoom; grows with the island (init)
-const destinationRotation = new THREE.Quaternion();
-const orientationCamera = camera.clone();
-const TRANSITION_S = 0.5;
-// Camera height -> 3D trees (0) / voxel text (1). Wheel zoom moves through this range.
-const viewBlend = (height) => THREE.MathUtils.smoothstep(height, 25, 70);
-const smooth = (t) => t * t * (3 - 2 * t);
-// Movement feel. Speeds in m/s. Starting: the velocity ramps linearly from 0 to full speed in
-// RAMP_S seconds. Stopping: it damps at DECEL per second (~95% gone after 3 / DECEL = 0.3 s glide).
-const WALK_SPEED = 8, RUN_SPEED = 14, RAMP_S = 0.15, DECEL = 10;
+let yaw = 0.25, pitch = 0.1, jumpQueued = false, character = null;
+// Walk <-> map transition. The camera spirals around the destination: it climbs (log-lerped
+// distance, polar angle to top-down) while turning its heading (azimuth) the short way round to
+// north, both on one ease, so it rotates and rises at the same time. No roll: the up vector is the
+// heading tilted by the polar angle, which ends as north-up when looking straight down.
+// MAP_HEIGHT: height of the final top-down view (then handed over to the map controls).
+const TRANSITION_S = 1.2, MAP_HEIGHT = 80;
+// Cinematic ease: smootherstep on a warped clock, so the move starts gently, peaks early and
+// settles over a long tail (no velocity jump at either end).
+const cinematic = (t) => smoother(1 - (1 - t) ** 1.5);
+const wrapAngle = (a) => a - Math.PI * 2 * Math.round(a / (Math.PI * 2));
+// View layers by camera height (m), one rule for the map zoom and both transition flights (no
+// separate timing): full 3D trees below TREE_HEIGHTS[0], voxel text above TREE_HEIGHTS[1], blended
+// in between. Higher up the live view morphs into the baked look (mapFill, MAP2D.fill) and the
+// baked image fades in on top (map2d.js, map mode only).
+const TREE_HEIGHTS = [20, 45];
+// Camera motion blur strength during transitions (screen smear per frame of motion).
+const MOTION_BLUR = { pan: 1.0, zoom: 0.8, max: 0.04 };
+const smoother = (t) => t * t * t * (t * (6 * t - 15) + 10);
+// Movement feel (Settings > MOVE). Speeds in m/s. Starting: the velocity ramps linearly from 0 to
+// full speed in rampS seconds. Slowing down (keys released, or a lower target speed) it glides:
+// exponential damping, ~95% of the excess gone after stopGlide seconds.
+// Boost: double-tap Shift (second tap within doubleTap s) and keep it held: the speed keeps climbing
+// from runSpeed to boostX x walkSpeed over boostTime seconds; releasing Shift ends it (glide down).
+const MOVE_DEFAULTS = { walkSpeed: 8, runSpeed: 14, rampS: 0.15, stopGlide: 0.6, boostX: 10, boostTime: 4, doubleTap: 0.3 };
+const MOVE = { ...MOVE_DEFAULTS };
+const MOVE_CONTROLS = [
+  { key: 'walkSpeed', label: 'Walk speed (m/s)', min: 2, max: 20, step: 0.5 },
+  { key: 'runSpeed', label: 'Run speed, Shift (m/s)', min: 4, max: 40, step: 1 },
+  { key: 'rampS', label: 'Start-up time (s)', min: 0.05, max: 1, step: 0.05 },
+  { key: 'stopGlide', label: 'Stop glide (s)', min: 0.1, max: 2, step: 0.05 },
+  { key: 'boostX', label: 'Boost max (x walk speed)', min: 2, max: 20, step: 1 },
+  { key: 'boostTime', label: 'Boost ramp time (s)', min: 0.5, max: 15, step: 0.5 },
+  { key: 'doubleTap', label: 'Double-tap window (s)', min: 0.15, max: 0.6, step: 0.05 },
+];
+const boost = { on: false, speed: 0, lastShift: -Infinity };
 const velocity = new THREE.Vector2(); // horizontal x/z velocity, kept between frames (momentum)
-// Camera transitions: the rotation reaches its destination after this share of the transition,
-// the position keeps easing over the whole transition.
-const ROTATE_SHARE = 0.4;
 // Hop-and-wobble walk (after "We Become What We Behold"): hops per second at walking speed,
 // hop height (m), sideways lean while airborne (rad). Purely visual; physics is untouched.
 const HOP = { rate: 3.2, height: 0.25, lean: 0.17 };
@@ -89,8 +109,7 @@ body.position.y = 0.78; body.castShadow = true; visual.add(body);
 const face = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 6), new THREE.MeshBasicMaterial({ color: 0x35473a }));
 face.position.set(-0.14, 1.1, -0.38); visual.add(face);
 const otherEye = face.clone(); otherEye.position.x = 0.14; visual.add(otherEye);
-// The player marker stays visible over the baked minimap; it is not baked itself.
-player.traverse((o) => o.layers.enable(MAP_BAKE.layer));
+// The player is not part of the baked map (map2d.js draws a dot instead).
 player.userData.skipBake = true;
 scene.add(player);
 let hopPhase = 0, hopAmount = 0;
@@ -99,7 +118,8 @@ let hopPhase = 0, hopAmount = 0;
 function animateHop(dt, speed, grounded) {
   hopAmount = THREE.MathUtils.damp(hopAmount, grounded && speed > 0.5 ? 1 : 0, 10, dt);
   if (hopAmount < 0.01) { hopPhase = 0; visual.position.y = 0; visual.rotation.set(0, 0, 0); visual.scale.set(1, 1, 1); return; }
-  hopPhase += dt * Math.PI * HOP.rate * Math.max(speed / WALK_SPEED, 0.6);
+  // Hop rate follows the speed up to running pace (boost speeds would make it a jitter).
+  hopPhase += dt * Math.PI * HOP.rate * THREE.MathUtils.clamp(speed / MOVE.walkSpeed, 0.6, MOVE.runSpeed / MOVE.walkSpeed);
   const s = Math.sin(hopPhase), air = Math.abs(s), squash = (1 - air) ** 6 * hopAmount;
   visual.position.y = HOP.height * air * hopAmount;
   visual.rotation.set(-0.08 * hopAmount, 0, HOP.lean * s * hopAmount);
@@ -145,33 +165,19 @@ function shoulderPoseUnclipped() {
 }
 
 // ---------- Input ----------
+// Walking: drag to look around. The map mode has its own pan / zoom (map2d.js).
 let dragging = false;
 renderer.domElement.addEventListener('pointerdown', (event) => {
-  if ((mode !== 'walk' && mode !== 'map') || event.button !== 0) return;
+  if (mode !== 'walk' || event.button !== 0) return;
   dragging = true; renderer.domElement.setPointerCapture(event.pointerId);
 });
 renderer.domElement.addEventListener('pointermove', (event) => {
-  if (!dragging) return;
-  if (mode === 'walk') {
-    yaw -= event.movementX * 0.004;
-    pitch = THREE.MathUtils.clamp(pitch - event.movementY * 0.003, PITCH_RANGE[0], PITCH_RANGE[1]);
-    return;
-  }
-  if (mode !== 'map') return;
-  const units = 2 * camera.position.y * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / renderer.domElement.clientHeight;
-  const x = THREE.MathUtils.clamp(target.x - event.movementX * units, -islandR, islandR);
-  const z = THREE.MathUtils.clamp(target.z - event.movementY * units, -islandR, islandR);
-  camera.position.x += x - target.x; camera.position.z += z - target.z;
-  target.x = x; target.z = z; camera.lookAt(target);
+  if (!dragging || mode !== 'walk') return;
+  yaw -= event.movementX * 0.004;
+  pitch = THREE.MathUtils.clamp(pitch - event.movementY * 0.003, PITCH_RANGE[0], PITCH_RANGE[1]);
 });
 renderer.domElement.addEventListener('pointerup', () => { dragging = false; });
 renderer.domElement.addEventListener('lostpointercapture', () => { dragging = false; });
-renderer.domElement.addEventListener('wheel', (event) => {
-  if (mode !== 'map') return;
-  event.preventDefault();
-  const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? innerHeight : 1);
-  zoomHeight = THREE.MathUtils.clamp(zoomHeight * Math.exp(delta * 0.0015), MAP_MIN_HEIGHT, mapMaxHeight);
-}, { passive: false });
 
 function resize() {
   renderer.setSize(innerWidth, innerHeight);
@@ -183,24 +189,47 @@ function resize() {
 function plotViewSize(plot) {
   return 12 + Math.max(plot.h + 18, (plot.w + 16) / (innerWidth / innerHeight)) / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
 }
+// CSS px per metre on the ground seen by a top-down camera at height h (and back): the map view
+// (map2d.js) and the top-down 3D camera share this scale, so the baked image lines up.
+const ppmAt = (h) => innerHeight / (2 * h * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+const heightAt = (ppm) => innerHeight / (2 * ppm * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
+// The single height rule for the view layers (see TREE_HEIGHTS): sets the baked-look morph and
+// returns the tree <-> voxel blend (0 = 3D trees, 1 = voxel text) for a camera at height y.
+function applyLayers(y) {
+  mapFill.value = map2d.fillAt(ppmAt(y));
+  return THREE.MathUtils.smoothstep(y, TREE_HEIGHTS[0], TREE_HEIGHTS[1]);
+}
+function startTransition(toMap, destination, height) {
+  mapCenter.value.copy(destination); // voxels pop in a wave from here
+  transition = {
+    start: performance.now() / 1000, toMap,
+    from: camera.position.clone(), target: target.clone(),
+    destination, height, prevNdc: null, prevDistance: 0,
+  };
+  mode = toMap ? 'entering' : 'leaving';
+}
 function beginView(toMap, plot = null) {
-  if (transition || !plots.length) return;
-  if (toMap) {
-    selected = plot || plots.reduce((closest, p) =>
-      Math.hypot(p.x - player.position.x, p.z - player.position.z) < Math.hypot(closest.x - player.position.x, closest.z - player.position.z) ? p : closest);
-    mapHeight = zoomHeight = Math.max(70, plotViewSize(selected));
-  }
+  if (transition || !plots.length || !map2d || mode === 'leaving-2d') return;
   keys.clear();
   dragging = false;
   viewToggle.disabled = true;
-  transition = {
-    start: performance.now() / 1000, toMap, flatFrom: plots[0].flat, flatTo: toMap ? viewBlend(mapHeight) : 0,
-    from: camera.position.clone(), rotation: camera.quaternion.clone(), target: target.clone(),
-    destination: plot ? new THREE.Vector3(plot.x, 0, plot.z) : new THREE.Vector3(player.position.x, 0, player.position.z),
-  };
-  mode = toMap ? 'entering' : 'leaving';
   marker.hidden = true;
-  document.body.classList.add('map-view'); info.hidden = false;
+  if (toMap) {
+    const destination = plot ? new THREE.Vector3(plot.x, 0, plot.z) : new THREE.Vector3(player.position.x, 0, player.position.z);
+    startTransition(true, destination, plot ? Math.max(MAP_HEIGHT, plotViewSize(plot)) : MAP_HEIGHT);
+    document.body.classList.add('map-view'); info.hidden = false;
+    return;
+  }
+  // Leaving: one flight from the current top-down view straight down to the player. Only if the
+  // baked look still shows (zoomed far out) does the view first zoom in until it is gone.
+  const view = map2d.view;
+  const leave = () => {
+    map2d.hide();
+    startTransition(false, new THREE.Vector3(view.x, 0, view.z), heightAt(view.ppm));
+  };
+  if (map2d.fill === 0) { leave(); return; }
+  mode = 'leaving-2d';
+  map2d.flyTo(view.x, view.z, map2d.clearPpm, reducedMotion ? 0 : 0.45).then(leave);
 }
 marker.onclick = () => beginView(true, nearby);
 // One toggle: map icon while walking, camera icon in the minimap.
@@ -233,17 +262,54 @@ function syncPostPanel() {
 }
 postEnabled.onchange = () => { POST_SETTINGS.enabled = postEnabled.checked; syncPostPanel(); };
 document.querySelector('#post-reset').onclick = () => { Object.assign(POST_SETTINGS, POST_DEFAULTS); syncPostPanel(); };
+// Movement panel: one slider per MOVE_CONTROLS row, plus reset.
+const moveSliders = MOVE_CONTROLS.map(({ key, label, min, max, step }) => {
+  const row = document.createElement('label');
+  row.className = 'setting';
+  row.innerHTML = `<span class="setting-row"><span>${label}</span><output></output></span><input type="range" min="${min}" max="${max}" step="${step}" />`;
+  const input = row.querySelector('input'), output = row.querySelector('output');
+  input.oninput = () => { MOVE[key] = Number(input.value); output.textContent = Number(input.value).toFixed(2); };
+  document.querySelector('#move-controls').append(row);
+  return { key, input, output };
+});
+function syncMovePanel() {
+  for (const s of moveSliders) { s.input.value = MOVE[s.key]; s.output.textContent = MOVE[s.key].toFixed(2); }
+}
+document.querySelector('#move-reset').onclick = () => { Object.assign(MOVE, MOVE_DEFAULTS); syncMovePanel(); };
+syncMovePanel();
+// Settings tabs: one section visible at a time.
+const settingsTabs = [...document.querySelectorAll('.settings-tab')];
+for (const tab of settingsTabs) {
+  tab.onclick = () => {
+    for (const other of settingsTabs) {
+      const selected = other === tab;
+      other.setAttribute('aria-selected', String(selected));
+      document.getElementById(other.getAttribute('aria-controls')).hidden = !selected;
+    }
+  };
+}
 syncPostPanel();
 addEventListener('keydown', (event) => {
   if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Escape', 'Space', 'ShiftLeft', 'ShiftRight'].includes(event.code)) {
     event.preventDefault();
     if (event.code === 'Space') { if (!event.repeat && (mode === 'walk' || mode === 'map')) jumpQueued = true; }
     else if (event.code === 'Escape' && mode === 'map') beginView(false);
-    else if (mode === 'walk' || mode === 'map') keys.add(event.code);
+    else if (mode === 'walk' || mode === 'map') {
+      keys.add(event.code);
+      // Boost: the second Shift press within MOVE.doubleTap seconds of the first.
+      if (event.code.startsWith('Shift') && !event.repeat) {
+        const now = performance.now() / 1000;
+        if (now - boost.lastShift <= MOVE.doubleTap) boost.on = true;
+        boost.lastShift = now;
+      }
+    }
   }
 });
-addEventListener('keyup', (event) => keys.delete(event.code));
-addEventListener('blur', () => keys.clear());
+addEventListener('keyup', (event) => {
+  keys.delete(event.code);
+  if (!keys.has('ShiftLeft') && !keys.has('ShiftRight')) boost.on = false;
+});
+addEventListener('blur', () => { keys.clear(); boost.on = false; });
 addEventListener('visibilitychange', () => keys.clear());
 addEventListener('resize', resize);
 document.querySelector('#replay').onclick = () => { plots.forEach((p) => p.view.setGrowth(0)); };
@@ -311,18 +377,15 @@ async function init() {
   const houses = [-1, 1].map((side) => ({ x: side * (GAP_X / 2 + maxW / 2), z: 0, angle: -side * Math.PI / 2 }));
   for (const h of houses) reach(h.x, h.z, 6);
   islandR = needR;
-  // Whole island must fit the farthest minimap zoom; the far plane follows.
-  mapMaxHeight = Math.max(260, islandR * 2.2);
-  camera.far = Math.max(900, mapMaxHeight * 1.6);
+  // Transitions may look down from a few hundred metres; the far plane follows the island size.
+  camera.far = Math.max(900, islandR * 3);
   camera.updateProjectionMatrix();
 
   // ---------- Island, sea, walls, park ----------
   const ground = buildGround(islandR);
   scene.add(ground.mesh);
   physics.trimesh(ground.vertices, ground.indices);
-  const water = buildWater(islandR, wind);
-  water.layers.enable(MAP_BAKE.layer); // the live sea stays visible around / under the baked map
-  scene.add(water);
+  scene.add(buildWater(islandR, wind));
   const wallSegments = 96;
   for (let i = 0; i < wallSegments; i++) {
     const a0 = (i / wallSegments) * Math.PI * 2, a1 = ((i + 1) / wallSegments) * Math.PI * 2;
@@ -342,14 +405,13 @@ async function init() {
     physics.box(post.position.x, 0.7, post.position.z, 0.2, 0.7, 0.2);
   }
 
-  // ---------- Baked minimap (map-bake.js): one top-down render of the map state ----------
-  mapBake = createMapBake(renderer, scene, islandR);
-  mapBake.bake((orthoCamera, extent) => {
+  // ---------- 2D map: one baked top-down image of the map state (map-bake.js, map2d.js) ----------
+  map2d = createMap2D(bakeMap(renderer, scene, post, islandR, (extent) => {
     scene.fog = null;
-    plots.forEach((p) => { p.view.setFlat(1); p.flat = -1; });
+    plots.forEach((p) => { p.view.setFlat(1); p.flat = -1; }); // flat = -1: re-applied next frame
     park.setFlat(1);
     fillerFade.value = 0; barkFade.value = 0; mapFill.value = 1;
-    // Shadows over the whole island (coarse, only houses / props / bushes cast here).
+    // Shadows over the whole island (coarse; only houses / props / bushes cast here).
     Object.assign(sun.shadow.camera, { left: -extent, right: extent, top: extent, bottom: -extent, far: 400 });
     sun.shadow.camera.updateProjectionMatrix();
     sun.target.position.set(0, 0, 0); sun.position.copy(SUN_OFFSET).multiplyScalar(3);
@@ -357,45 +419,60 @@ async function init() {
     scene.updateMatrixWorld();
   }, () => {
     scene.fog = fog;
+    mapFill.value = 0;
     sun.shadow.camera.far = 160;
     sun.shadow.camera.right = 0; // forces the per-frame frustum update
-  });
+  }));
 
   character = physics.createCharacter(0, 0.2, 10);
   Object.assign(player.position, character.feet());
   let pose = shoulderPose(); target.copy(pose.focus); camera.position.copy(pose.eye); camera.lookAt(target);
   resize(); status.hidden = true; viewToggle.disabled = false;
   let previous = performance.now() / 1000;
+  const from = new THREE.Spherical(), to = new THREE.Spherical(), along = new THREE.Spherical();
+  const centre = new THREE.Vector3(), endOffset = new THREE.Vector3(), ndc = new THREE.Vector3();
+  const setViewLabel = () => {
+    viewToggle.dataset.view = mode;
+    viewToggle.querySelector('.view-label').textContent = mode === 'map' ? 'TPS CAMERA' : 'MINIMAP';
+    viewToggle.setAttribute('aria-label', mode === 'map' ? 'Back to the garden view' : 'Open minimap');
+  };
 
   renderer.setAnimationLoop(() => {
     const now = performance.now() / 1000, dt = Math.min(now - previous, 0.05); previous = now;
     wind.value = now;
-    let flat = mode === 'walk' ? 0 : viewBlend(camera.position.y);
-    let haze = 0, tilt = 0;
+    let flat = mode === 'walk' ? 0 : 1;
+    let haze = 0;
 
-    // Movement (walk + minimap). Screen axes in the minimap, camera-yaw axes when walking.
-    // Keys set a target velocity; the real velocity follows it (momentum). Shift runs.
+    // Movement (walk + map). Screen axes on the map, camera-yaw axes when walking.
+    // Keys set a target velocity; the real velocity follows it (momentum). Shift runs; boost (double-
+    // tapped Shift, held) keeps raising the target speed while moving.
     let wantX = 0, wantZ = 0, x = 0, z = 0;
     if (!transition && (mode === 'walk' || mode === 'map')) {
       x = Number(keys.has('KeyD') || keys.has('ArrowRight')) - Number(keys.has('KeyA') || keys.has('ArrowLeft'));
       z = Number(keys.has('KeyW') || keys.has('ArrowUp')) - Number(keys.has('KeyS') || keys.has('ArrowDown'));
       const length = Math.hypot(x, z) || 1;
-      const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? RUN_SPEED : WALK_SPEED;
+      const boostMax = MOVE.walkSpeed * MOVE.boostX;
+      boost.speed = boost.on && (x || z)
+        ? Math.min(boostMax, Math.max(boost.speed, MOVE.runSpeed) + ((boostMax - MOVE.runSpeed) / MOVE.boostTime) * dt)
+        : MOVE.runSpeed;
+      const speed = boost.on ? boost.speed : keys.has('ShiftLeft') || keys.has('ShiftRight') ? MOVE.runSpeed : MOVE.walkSpeed;
       const f = mode === 'map' ? { x: 0, z: -1 } : { x: -Math.sin(yaw), z: -Math.cos(yaw) };
       const r = mode === 'map' ? { x: 1, z: 0 } : { x: Math.cos(yaw), z: -Math.sin(yaw) };
       wantX = ((r.x * x + f.x * z) / length) * speed;
       wantZ = ((r.z * x + f.z * z) / length) * speed;
     }
-    if (x || z) {
-      // Linear ramp: full speed is reached RAMP_S seconds after starting from rest.
+    const glide = 3 / MOVE.stopGlide; // damping rate: ~95% of the excess speed gone after stopGlide s
+    if ((x || z) && Math.hypot(wantX, wantZ) >= velocity.length()) {
+      // Speeding up / turning: linear ramp, full speed rampS seconds after starting from rest.
       const dvx = wantX - velocity.x, dvz = wantZ - velocity.y, gap = Math.hypot(dvx, dvz);
-      const step = (Math.hypot(wantX, wantZ) / RAMP_S) * dt;
+      const step = (Math.hypot(wantX, wantZ) / MOVE.rampS) * dt;
       if (gap <= step) velocity.set(wantX, wantZ); else velocity.set(velocity.x + (dvx / gap) * step, velocity.y + (dvz / gap) * step);
-      player.rotation.y = Math.atan2(-wantX, -wantZ);
     } else {
-      velocity.set(THREE.MathUtils.damp(velocity.x, 0, DECEL, dt), THREE.MathUtils.damp(velocity.y, 0, DECEL, dt));
-      if (velocity.lengthSq() < 1e-4) velocity.set(0, 0);
+      // Slowing down (stopped, or a lower target after run / boost): glide towards the target.
+      velocity.set(THREE.MathUtils.damp(velocity.x, wantX, glide, dt), THREE.MathUtils.damp(velocity.y, wantZ, glide, dt));
+      if (!(x || z) && velocity.lengthSq() < 1e-4) velocity.set(0, 0);
     }
+    if (x || z) player.rotation.y = Math.atan2(-wantX, -wantZ);
     character.move(velocity.x * dt, velocity.y * dt, dt, jumpQueued && !transition);
     jumpQueued = false;
     physics.step(dt);
@@ -403,58 +480,94 @@ async function init() {
     animateHop(dt, reducedMotion ? 0 : velocity.length(), character.grounded());
     cameraFloor = THREE.MathUtils.damp(cameraFloor, player.position.y, character.grounded() ? 6 : 1.5, dt);
 
+    // Map: the map view (pan / zoom, map2d.js) drives a straight top-down 3D camera, north up.
+    // Zooming in, voxels give way to 3D trees around the screen centre; zooming far out, the baked
+    // image fades in on top. Once it covers the whole screen the 3D scene is not rendered.
+    // Just before the image shows, the live view morphs into the baked look (mapFill), so the
+    // crossfade blends two matching pictures. Layers follow the camera height (applyLayers).
+    mapFill.value = 0;
+    if (mode === 'map' || mode === 'leaving-2d') {
+      map2d.update(player.position);
+      const view = map2d.view, height = heightAt(view.ppm);
+      camera.position.set(view.x, height, view.z);
+      camera.rotation.set(-Math.PI / 2, 0, 0);
+      target.set(view.x, 0, view.z);
+      mapCenter.value.copy(target); // voxels sink / pop in a wave from the screen centre
+      flat = applyLayers(height);
+      if (map2d.opacity === 1) return;
+    }
+
+    let motionX = 0, motionY = 0, zoomBlur = 0;
     if (transition) {
       const progress = reducedMotion ? 1 : Math.min(1, (now - transition.start) / TRANSITION_S);
-      haze = reducedMotion ? 0 : Math.sin(progress * Math.PI);
-      tilt = (transition.toMap ? 1 - progress : progress) * 0.35;
-      // Trees -> voxel text from 0.2 s to 0.4 s of the 0.5 s transition.
-      flat = THREE.MathUtils.lerp(transition.flatFrom, transition.flatTo, smooth(THREE.MathUtils.clamp((progress - 0.4) / 0.4, 0, 1)));
-      const k = smooth(progress), turn = smooth(Math.min(1, progress / ROTATE_SHARE));
+      haze = reducedMotion ? 0 : Math.sin(progress * Math.PI) * 0.35;
+      const k = cinematic(progress);
       pose = shoulderPose();
-      const to = transition.toMap ? transition.destination : pose.focus;
-      target.lerpVectors(transition.target, to, k);
-      desired.copy(transition.toMap ? new THREE.Vector3(to.x, mapHeight, to.z + 0.001) : pose.eye);
-      orientationCamera.position.copy(desired); orientationCamera.lookAt(to);
-      destinationRotation.copy(orientationCamera.quaternion);
-      camera.position.lerpVectors(transition.from, desired, k);
-      camera.quaternion.slerpQuaternions(transition.rotation, destinationRotation, turn);
+      // Spiral around the centre: distance (log), polar angle and heading are interpolated on the
+      // same ease. Top-down heads north (azimuth 0); the turn takes the short way round.
+      // Leaving, the centre glides from the map view point to the player's shoulder view.
+      const endCentre = transition.toMap ? transition.destination : pose.focus;
+      centre.lerpVectors(transition.destination, endCentre, k);
+      if (transition.toMap) endOffset.set(0, transition.height, 0); else endOffset.copy(pose.eye).sub(pose.focus);
+      from.setFromVector3(desired.copy(transition.from).sub(transition.destination));
+      to.setFromVector3(endOffset);
+      if (transition.toMap) to.theta = from.theta + wrapAngle(-from.theta);
+      else { from.theta = 0; to.theta = wrapAngle(to.theta); }
+      along.set(Math.exp(THREE.MathUtils.lerp(Math.log(from.radius), Math.log(to.radius), k)),
+        THREE.MathUtils.lerp(from.phi, to.phi, k), THREE.MathUtils.lerp(from.theta, to.theta, k));
+      camera.position.setFromSpherical(along).add(centre);
+      target.lerpVectors(transition.target, centre, k);
+      // No roll: up = world up tilted towards the heading by the polar angle. Looking level it is
+      // world up; looking straight down it is the heading (north at the map end), so lookAt never
+      // degenerates.
+      camera.up.set(-Math.sin(along.theta) * Math.cos(along.phi), Math.sin(along.phi), -Math.cos(along.theta) * Math.cos(along.phi));
+      camera.lookAt(target);
+      camera.updateMatrixWorld(true);
+      // Layers by height: climbing, trees sink and voxels pop; descending, voxels sink and trees
+      // regrow as soon as the camera drops below TREE_HEIGHTS (same rule as the map zoom).
+      flat = applyLayers(camera.position.y);
+      // Motion blur: how far the centre moved on screen since the last frame, and how fast the
+      // camera approached / left it (radial smear).
+      ndc.copy(centre).project(camera);
+      const distance = camera.position.distanceTo(centre);
+      if (transition.prevNdc && !reducedMotion) {
+        const max = MOTION_BLUR.max;
+        motionX = THREE.MathUtils.clamp((ndc.x - transition.prevNdc.x) * 0.5 * MOTION_BLUR.pan, -max, max);
+        motionY = THREE.MathUtils.clamp((ndc.y - transition.prevNdc.y) * 0.5 * MOTION_BLUR.pan, -max, max);
+        zoomBlur = THREE.MathUtils.clamp(((transition.prevDistance - distance) / distance) * MOTION_BLUR.zoom, -max * 2, max * 2);
+      }
+      transition.prevNdc = ndc.clone(); transition.prevDistance = distance;
       if (progress === 1) {
-        mode = transition.toMap ? 'map' : 'walk'; transition = null;
+        camera.up.set(0, 1, 0);
+        if (transition.toMap) {
+          // Hand over to the map controls at the same framing (the image is still transparent).
+          map2d.show(centre.x, centre.z, ppmAt(transition.height));
+          mode = 'map';
+        } else {
+          mode = 'walk';
+          info.hidden = true;
+          document.body.classList.remove('map-view');
+        }
+        transition = null;
         viewToggle.disabled = false;
-        viewToggle.dataset.view = mode;
-        viewToggle.querySelector('.view-label').textContent = mode === 'map' ? 'TPS CAMERA' : 'MINIMAP';
-        viewToggle.setAttribute('aria-label', mode === 'map' ? 'Back to the garden view' : 'Open minimap');
-        info.hidden = mode === 'walk';
-        document.body.classList.toggle('map-view', mode === 'map');
+        setViewLabel();
       }
     } else if (mode === 'walk') {
       updateArm(dt);
       pose = shoulderPose();
       const follow = reducedMotion ? 1 : 1 - Math.exp(-12 * dt);
       target.lerp(pose.focus, follow); camera.position.lerp(pose.eye, follow); camera.lookAt(target);
-    } else if (mode === 'map') {
-      mapHeight = THREE.MathUtils.damp(mapHeight, zoomHeight, 12, dt);
-      camera.position.y = mapHeight;
-      camera.lookAt(target);
     }
-    // Depth precision: the near plane follows the camera height (0.1 m walking, ~10 m at 1 km),
-    // otherwise thin floors / the shoreline z-fight at far minimap zoom.
+    // Depth precision: the near plane follows the camera height (0.1 m walking, larger when high).
     const near = THREE.MathUtils.clamp(camera.position.y * 0.008, 0.1, 15);
     if (Math.abs(near - camera.near) > camera.near * 0.05) { camera.near = near; camera.updateProjectionMatrix(); }
-    // Baked minimap crossfade; fully baked = draw only the bake layer, skip shadows and streaming.
-    const baked = mapBake.update(camera.position.y, mode !== 'walk' && !(transition && !transition.toMap));
-    if (baked >= 1) camera.layers.set(MAP_BAKE.layer); else camera.layers.set(0);
-    renderer.shadowMap.autoUpdate = baked < 1;
     camera.updateMatrixWorld(true);
-    // Filler leaves are for the walking view: they dissolve as the camera turns to look down
-    // (fully gone once it looks down steeper than ~53 degrees, e.g. the minimap).
+    // Filler leaves are for the walking view: they dissolve as the camera turns to look down.
     camera.getWorldDirection(projected);
     fillerFade.value = 1 - THREE.MathUtils.smoothstep(-projected.y, 0.45, 0.8);
     barkFade.value = mode === 'walk' ? 1 : fillerFade.value;
     // Leaves between the camera and the character are dropped (character always visible).
     seeThrough.value = mode === 'walk' && !transition ? camera.position.distanceTo(player.position) : 0;
-    // Far minimap zoom: close the sub-pixel gaps between voxels / tiles (they flickered).
-    mapFill.value = mode === 'walk' ? 0 : THREE.MathUtils.smoothstep(camera.position.y, 90, 160);
 
     nearby = mode === 'walk' ? plots.find((plot) => plot.entrance.distanceTo(player.position) < 6) || null : null;
     marker.hidden = !nearby;
@@ -469,9 +582,13 @@ async function init() {
 
     // Shadows follow what the camera looks at, snapped to whole shadow-map texels (in the light's
     // own right/up axes) so edges stay still while moving; fog recedes as the camera climbs.
-    const half = mode === 'walk' ? SHADOW_HALF.walk : SHADOW_HALF.map;
+    // Off the walking view the frustum grows with the camera height (in 20 m steps), so a zoomed-out
+    // map shows no shadow square; the sun distance and depth range grow with it (the slanted
+    // light sees a wider ground area deeper).
+    const half = mode === 'walk' ? SHADOW_HALF.walk : Math.max(SHADOW_HALF.map, Math.ceil(camera.position.y / 20) * 20);
+    const sunScale = Math.max(1, half / SHADOW_HALF.map);
     if (sun.shadow.camera.right !== half) {
-      Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half });
+      Object.assign(sun.shadow.camera, { left: -half, right: half, top: half, bottom: -half, far: 160 * sunScale });
       sun.shadow.camera.updateProjectionMatrix();
     }
     const texelSize = (2 * half) / sun.shadow.mapSize.x;
@@ -479,20 +596,19 @@ async function init() {
     desired.set(target.x, 0, target.z);
     const a = snap(desired.dot(sunRight)), b = snap(desired.dot(sunUp)), c = desired.dot(sunDir);
     sun.target.position.copy(sunRight).multiplyScalar(a).addScaledVector(sunUp, b).addScaledVector(sunDir, c);
-    sun.position.copy(sun.target.position).add(SUN_OFFSET);
+    sun.position.copy(sun.target.position).addScaledVector(SUN_OFFSET, sunScale);
     scene.fog.near = 90 + camera.position.y * 1.5;
     scene.fog.far = 260 + camera.position.y * 3;
     post.uniforms.uHaze.value = haze;
-    post.uniforms.uTilt.value = tilt;
+    post.uniforms.uTilt.value = 0;
+    post.uniforms.uMotion.value.set(motionX, motionY);
+    post.uniforms.uZoomBlur.value = zoomBlur;
 
     if (Math.abs(flat - plots[0].flat) > 0.0001) park.setFlat(flat);
     for (const plot of plots) {
       if (Math.abs(flat - plot.flat) > 0.0001) { plot.view.setFlat(flat); plot.flat = flat; }
-      const observer = mode === 'map' ? target : player.position;
-      const visibleOnMap = mode !== 'walk' && (plot === selected ||
-        (Math.abs(plot.x - target.x) < plot.w / 2 + camera.position.y * camera.aspect &&
-         Math.abs(plot.z - target.z) < plot.h / 2 + camera.position.y));
-      if (baked < 1) plot.view.tick(dt, observer, visibleOnMap, reducedMotion, camera); // nothing 3D to stream under the baked map
+      // Trees grow around the player, or around the screen centre on the map.
+      plot.view.tick(dt, mode === 'map' ? target : player.position, false, reducedMotion, camera);
     }
     park.setPlayer(player.position);
     updateWind(dt);

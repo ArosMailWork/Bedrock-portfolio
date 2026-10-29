@@ -1,64 +1,46 @@
-// Baked minimap: once, after loading, an orthographic camera straight above the island renders the
-// map state (voxel text, floors, paths, houses, sea; no trees, grass, clouds, wind or player) into a
-// mipmapped texture. A plane carrying it fades in as the minimap camera climbs; once fully shown the
-// camera only draws MAP_BAKE.layer (the plane, the live sea, the player marker, the lights), so the
-// far minimap costs almost nothing and cannot flicker (no thin geometry, mipmaps instead).
+// Baked map: once, after loading, an orthographic camera straight above the island renders the map
+// state (voxel text, floors, paths, houses, sea; no trees, grass, clouds, wind or player). The image
+// goes through the same colour grading as the 3D view (post.grade) and is copied into a plain 2D
+// <canvas>, which the 2D map mode (map2d.js) pans and zooms like any web map.
 import * as THREE from 'three';
 
 export const MAP_BAKE = {
-  size: 4096,          // texture size (px), clamped to the GPU limit; ~0.3 m per px for R = 570 m
-  from: 200, to: 300,  // camera height (m): live 3D below `from`, baked image above `to`, crossfade between
-  layer: 1,            // render layer of the objects still drawn over the baked image
-  edge: 0.06,          // share of the image fading out at its border into the live sea
+  size: 4096,   // image size (px), clamped to the GPU limit; ~0.32 m per px for an island of R 570 m
+  margin: 1.15, // image half-extent = margin x island radius (includes a ring of sea)
 };
 
-export function createMapBake(renderer, scene, islandR) {
+export function bakeMap(renderer, scene, post, islandR, prepare, restore) {
   const size = Math.min(MAP_BAKE.size, renderer.capabilities.maxTextureSize);
-  const extent = islandR * 1.15;
-  const target = new THREE.WebGLRenderTarget(size, size, {
-    samples: 4, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, colorSpace: THREE.SRGBColorSpace,
-  });
-  target.texture.anisotropy = 8;
+  const extent = islandR * MAP_BAKE.margin;
+  const scenePass = new THREE.WebGLRenderTarget(size, size, { samples: 4, type: THREE.HalfFloatType });
+  // sRGB output target: the composite pass encodes to display space, like the screen.
+  const graded = new THREE.WebGLRenderTarget(size, size, { depthBuffer: false, colorSpace: THREE.SRGBColorSpace });
   const camera = new THREE.OrthographicCamera(-extent, extent, extent, -extent, 1, 2000);
   camera.position.set(0, 1000, 0);
-  camera.up.set(0, 0, -1); // image top = -z, right = +x: matches the plane's UVs
+  camera.up.set(0, 0, -1); // image top = north (-z), right = +x, like the 2D map
   camera.lookAt(0, 0, 0);
   camera.updateMatrixWorld();
 
-  const mix = { value: 0 };
-  const material = new THREE.MeshBasicMaterial({ map: target.texture, transparent: true, depthWrite: false, fog: false });
-  material.onBeforeCompile = (shader) => {
-    shader.uniforms.uMix = mix;
-    shader.fragmentShader = `uniform float uMix;\n` + shader.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>
-      vec2 edge = min(vMapUv, 1.0 - vMapUv);
-      diffuseColor.a *= uMix * smoothstep(0.0, ${MAP_BAKE.edge.toFixed(3)}, min(edge.x, edge.y));`);
-  };
-  const plane = new THREE.Mesh(new THREE.PlaneGeometry(2 * extent, 2 * extent).rotateX(-Math.PI / 2), material);
-  plane.position.y = 0.9; // above floors and voxels, below houses (hidden once fully baked anyway)
-  plane.renderOrder = 10;
-  plane.layers.enable(MAP_BAKE.layer);
-  plane.visible = false;
-  plane.userData.skipBake = true;
-  scene.add(plane);
+  // Objects with userData.skipBake (sky, clouds, wind lines, falling leaves, player) stay out.
+  const hidden = [];
+  scene.traverse((o) => { if (o.userData.skipBake && o.visible) { o.visible = false; hidden.push(o); } });
+  prepare(extent);
+  renderer.setRenderTarget(scenePass);
+  renderer.render(scene, camera);
+  post.grade(scenePass.texture, graded);
+  const pixels = new Uint8Array(size * size * 4);
+  renderer.readRenderTargetPixels(graded, 0, 0, size, size, pixels);
+  renderer.setRenderTarget(null);
+  restore();
+  hidden.forEach((o) => { o.visible = true; });
+  scenePass.dispose(); graded.dispose();
 
-  return {
-    // prepare(): put the scene in its map state; restore(): undo. Objects with userData.skipBake
-    // (and their children) are hidden while baking.
-    bake(prepare, restore) {
-      const hidden = [];
-      scene.traverse((o) => { if (o.userData.skipBake && o.visible) { o.visible = false; hidden.push(o); } });
-      prepare(camera, extent);
-      renderer.setRenderTarget(target);
-      renderer.render(scene, camera);
-      renderer.setRenderTarget(null);
-      restore();
-      hidden.forEach((o) => { o.visible = true; });
-    },
-    // Returns the crossfade amount for this camera height (0 = live 3D, 1 = baked image only).
-    update(height, active) {
-      mix.value = active ? THREE.MathUtils.smoothstep(height, MAP_BAKE.from, MAP_BAKE.to) : 0;
-      plane.visible = mix.value > 0;
-      return mix.value;
-    },
-  };
+  // GPU rows start at the bottom: flip while copying into the canvas.
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.createImageData(size, size), row = size * 4;
+  for (let y = 0; y < size; y++) image.data.set(pixels.subarray((size - 1 - y) * row, (size - y) * row), y * row);
+  ctx.putImageData(image, 0, 0);
+  return { canvas, extent };
 }

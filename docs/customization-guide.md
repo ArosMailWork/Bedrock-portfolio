@@ -167,9 +167,12 @@ and the object disappears.
 
 ## 5. Movement and camera (`js/garden.js`)
 
-- `WALK_SPEED` (8 m/s), `RUN_SPEED` (14 m/s, hold Shift), next to `viewBlend`.
-- Start: `RAMP_S` (0.15 s) from standstill to full speed, linear. Stop: `DECEL` (10) damping rate,
-  about `3 / DECEL` seconds of glide. Lower `DECEL` = longer glide.
+- All movement values are in `MOVE_DEFAULTS` and can be tuned live in Settings > MOVE:
+  `walkSpeed` (8 m/s), `runSpeed` (14 m/s, hold Shift), `rampS` (0.15 s from standstill to full
+  speed, linear), `stopGlide` (0.6 s of glide when slowing down; higher = slides further).
+- Boost: double-tap Shift (within `doubleTap`, 0.3 s) and keep holding it; the speed climbs to
+  `boostX` × walkSpeed (10 × = 80 m/s) over `boostTime` (4 s). Letting go of Shift ends it.
+  To add a slider, add a row to `MOVE_CONTROLS`.
 - Hop-and-wobble walk: `HOP.rate` (hops/s at walking speed), `HOP.height` (m), `HOP.lean` (rad).
   It only moves the `visual` group (body + eyes), never the physics capsule.
 - Walk <-> minimap transition: `TRANSITION_S` (0.5 s); `ROTATE_SHARE` (0.4) = share of it used
@@ -180,9 +183,9 @@ and the object disappears.
 
 ## 6. Trees to voxels (minimap)
 
-`viewBlend()` maps camera height 25–70 m to progress 0–1. `setFlat()` in `tree-mesh.js`: branches
-fade over 0–0.3, leaves sink (`uSink`) over 0.05–0.8 and fade over 0.65–0.8, voxels appear over 0.05–0.5.
-Opening the minimap targets at least 70 m height, where the voxel text is fully readable.
+`setFlat(p)` in `tree-mesh.js` (p = 0 trees … 1 map, driven by the transition): branches fade over
+0–0.3, leaves sink (`uSink`) over 0.05–0.8 and fade over 0.65–0.8, voxels pop up in a wave over 0.1–1.
+See section 11 for the flight and the 2D map.
 
 ## 7. Park, grass and props
 
@@ -235,10 +238,16 @@ Grass streams in squares (`GRASS` in `park.js`: chunk size, build radius, free r
 Floor tiles and voxels are 32-cell chunks. Raise `buildsPerFrame` if trees appear too slowly when
 running; lower it if you see hitches.
 
-## 11. Baked minimap (`js/map-bake.js`)
+## 11. Map mode (2D) and the transition
 
-Zoomed far out, the minimap shows one image of the island rendered from above at load time, instead
-of the live 3D scene. `MAP_BAKE`: `size` (texture px; bigger = sharper text, more memory), `from` / `to`
-(camera heights of the crossfade), `edge` (soft border). Anything that must not appear in the image
-gets `object.userData.skipBake = true`; anything that must stay visible on top of it gets
-`object.layers.enable(MAP_BAKE.layer)` (the player and the sea do).
+The map is a flat 2D image (`js/map2d.js`) baked once at load (`js/map-bake.js`, `MAP_BAKE.size` =
+sharpness / memory). Zoom limits: `MAP2D.maxPpm`. Wheel feel: `MAP2D.wheelStep`
+(zoom per notch; smaller = finer steps) and `MAP2D.zoomEase` (smoothing speed; smaller = softer, slower). The flight into / out of it lives in `garden.js`:
+`TRANSITION_S` (duration), `cinematic` (the ease shared by climb and turn; the camera always turns
+the short way to north-up), `MAP_HEIGHT` (where the map view takes over), `MOTION_BLUR` (pan / zoom
+smear). View layers follow the camera height only (map zoom and both flights, `applyLayers`):
+`TREE_HEIGHTS` (trees ↔ voxels; lower values = 3D comes back later on the way down), `MAP2D.fill`
+(live view morphs into the baked look) and `MAP2D.imageFade` (baked image fades in) in `map2d.js`.
+Voxel pop:
+`VOXEL` in `tree-mesh.js` (block height, wave spread). Objects that must not appear in the baked
+image get `object.userData.skipBake = true`. Floor paving around text: `PAVED`, `SOLID`, `MARGIN`.

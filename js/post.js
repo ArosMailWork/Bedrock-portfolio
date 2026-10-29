@@ -1,7 +1,7 @@
 // Post-processing. The scene renders into a 4x MSAA half-float target, then:
 //   1. Bloom (like bruno-simon.com: threshold 1, strength 0.25): soft-threshold prefilter, a 5-level
 //      dual-filter downsample chain, then upsampling back while adding each level.
-//   2. Composite: tilt-shift edge blur / transition haze, bloom, exposure, violet vignette,
+//   2. Composite: tilt-shift edge blur / transition haze / camera motion blur, bloom, exposure, violet vignette,
 //      conversion to sRGB, then colour grading in display space (contrast, saturation, split toning:
 //      violet shadows / warm highlights, after Bruno's day palette).
 // POST_SETTINGS is mutable (settings panel); POST_CONTROLS describes the sliders. To add an effect:
@@ -74,12 +74,15 @@ export function createPost(renderer) {
     tScene: { value: target.texture }, tBloom: { value: ups[0].texture },
     uTexel: { value: new THREE.Vector2() },
     uTilt: { value: 1 }, uHaze: { value: 0 },
+    // Camera motion blur (transitions): uMotion = screen-space smear (UV), uZoomBlur = radial smear.
+    uMotion: { value: new THREE.Vector2() }, uZoomBlur: { value: 0 }, uNoVignette: { value: 0 },
     uEnabled: { value: 1 }, uBloom: { value: 0.25 }, uExposure: { value: 1 }, uContrast: { value: 1 }, uSaturation: { value: 1 },
     uShadowTint: { value: 0 }, uHighlightTint: { value: 0 }, uVignette: { value: 0.45 },
     uShadowColor: { value: srgb(GRADE_COLORS.shadow) }, uHighlightColor: { value: srgb(GRADE_COLORS.highlight) },
   };
   const composite = pass(`
     uniform sampler2D tScene, tBloom; uniform vec2 uTexel;
+    uniform vec2 uMotion; uniform float uZoomBlur, uNoVignette;
     uniform float uTilt, uHaze, uEnabled, uBloom, uExposure, uContrast, uSaturation, uShadowTint, uHighlightTint, uVignette;
     uniform vec3 uShadowColor, uHighlightColor;
     varying vec2 vUv;
@@ -96,12 +99,20 @@ export function createPost(renderer) {
         }
         c = sum / 17.0;
       }
+      if (length(uMotion) + abs(uZoomBlur) > 0.0005) {
+        vec4 sum = vec4(0.0);
+        for (int i = 0; i < 12; i++) {
+          float t = float(i) / 11.0 - 0.5;
+          sum += texture2D(tScene, vUv + uMotion * t + (vUv - 0.5) * uZoomBlur * t);
+        }
+        c = sum / 12.0;
+      }
       vec3 col = c.rgb;
       if (uEnabled > 0.5) col = (col + texture2D(tBloom, vUv).rgb * uBloom) * uExposure;
       float v = length((vUv - 0.5) * vec2(1.0, 0.85));
       float shade = smoothstep(0.95, 0.35, v);
       float vignette = (uEnabled > 0.5 ? uVignette : 0.45) + uHaze * 0.5;
-      col = mix(col * vec3(0.55, 0.5, 0.7), col, mix(1.0, shade, vignette));
+      if (uNoVignette < 0.5) col = mix(col * vec3(0.55, 0.5, 0.7), col, mix(1.0, shade, vignette));
       vec3 o = linearToOutputTexel(vec4(col, 1.0)).rgb;    // display (sRGB) space from here on
       if (uEnabled > 0.5) {
         o = (o - 0.5) * uContrast + 0.5;
@@ -119,6 +130,18 @@ export function createPost(renderer) {
   quadScene.add(quad);
   const draw = (material, output) => { quad.material = material; renderer.setRenderTarget(output); renderer.render(quadScene, quadCamera); };
   const texel = (rtarget) => new THREE.Vector2(1 / rtarget.width, 1 / rtarget.height);
+
+  function applySettings() {
+    const s = POST_SETTINGS;
+    uniforms.uEnabled.value = s.enabled ? 1 : 0;
+    uniforms.uBloom.value = s.bloomStrength;
+    uniforms.uExposure.value = s.exposure;
+    uniforms.uContrast.value = s.contrast;
+    uniforms.uSaturation.value = s.saturation;
+    uniforms.uShadowTint.value = s.shadowTint;
+    uniforms.uHighlightTint.value = s.highlightTint;
+    uniforms.uVignette.value = s.vignette;
+  }
 
   return {
     uniforms,
@@ -158,15 +181,20 @@ export function createPost(renderer) {
           draw(upsample, ups[i]);
         }
       }
-      uniforms.uEnabled.value = s.enabled ? 1 : 0;
-      uniforms.uBloom.value = s.bloomStrength;
-      uniforms.uExposure.value = s.exposure;
-      uniforms.uContrast.value = s.contrast;
-      uniforms.uSaturation.value = s.saturation;
-      uniforms.uShadowTint.value = s.shadowTint;
-      uniforms.uHighlightTint.value = s.highlightTint;
-      uniforms.uVignette.value = s.vignette;
+      applySettings();
       draw(composite, null);
+    },
+    // Colour-grade a texture into `output` like the screen (no blur, bloom or vignette): the baked map.
+    grade(texture, output) {
+      applySettings();
+      const saved = [uniforms.tScene.value, uniforms.uTilt.value, uniforms.uHaze.value, uniforms.uMotion.value.clone(), uniforms.uZoomBlur.value];
+      Object.assign(uniforms.tScene, { value: texture });
+      uniforms.uTilt.value = 0; uniforms.uHaze.value = 0; uniforms.uMotion.value.set(0, 0); uniforms.uZoomBlur.value = 0;
+      uniforms.uBloom.value = 0; uniforms.uNoVignette.value = 1;
+      draw(composite, output);
+      [uniforms.tScene.value, uniforms.uTilt.value, uniforms.uHaze.value] = saved;
+      uniforms.uMotion.value.copy(saved[3]); uniforms.uZoomBlur.value = saved[4];
+      uniforms.uNoVignette.value = 0;
     },
   };
 }

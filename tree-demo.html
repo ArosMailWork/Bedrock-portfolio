@@ -43,18 +43,30 @@
 
   <aside id="settings" class="hud-panel px-corners" hidden aria-label="Settings">
     <p class="eyebrow">◆ Settings</p>
-    <h2>GARDEN</h2>
-    <label class="setting">
-      <span class="setting-row"><span>Tree grow range</span><output id="grow-range-value" for="grow-range">40 m</output></span>
-      <input id="grow-range" type="range" min="15" max="150" step="5" value="40" />
-    </label>
-    <p class="hint">Trees grow when you come this close and shrink back once you walk 15 m further away.</p>
-    <p class="eyebrow settings-section">◆ Post processing</p>
-    <label class="setting setting-toggle">
-      <span class="setting-row"><span>Enabled (bloom + colour grading)</span><input id="post-enabled" type="checkbox" checked /></span>
-    </label>
-    <div id="post-controls"></div>
-    <button id="post-reset" class="settings-button" type="button">RESET TO DEFAULT</button>
+    <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+      <button class="settings-tab" type="button" role="tab" aria-selected="true" aria-controls="tab-garden">GARDEN</button>
+      <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-post">POST</button>
+      <button class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-move">MOVE</button>
+    </div>
+    <section id="tab-garden" role="tabpanel">
+      <label class="setting">
+        <span class="setting-row"><span>Tree grow range</span><output id="grow-range-value" for="grow-range">40 m</output></span>
+        <input id="grow-range" type="range" min="15" max="150" step="5" value="40" />
+      </label>
+      <p class="hint">Trees grow when you come this close and shrink back once you walk 15 m further away.</p>
+    </section>
+    <section id="tab-post" role="tabpanel" hidden>
+      <label class="setting setting-toggle">
+        <span class="setting-row"><span>Enabled (bloom + colour grading)</span><input id="post-enabled" type="checkbox" checked /></span>
+      </label>
+      <div id="post-controls"></div>
+      <button id="post-reset" class="settings-button" type="button">RESET TO DEFAULT</button>
+    </section>
+    <section id="tab-move" role="tabpanel" hidden>
+      <div id="move-controls"></div>
+      <p class="hint">Double-tap Shift and keep holding it to boost: the speed keeps climbing until you let go.</p>
+      <button id="move-reset" class="settings-button" type="button">RESET TO DEFAULT</button>
+    </section>
   </aside>
 
   <button id="plot-marker" class="plot-marker" hidden aria-label="View nearby plot from above"><span class="marker-label"></span><span class="diamond"><span>↵</span></span></button>
